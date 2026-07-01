@@ -9,6 +9,8 @@ section below as the GitHub Release notes.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-02
+
 ### Added
 - **Categories tab** for managing your own spending categories: add, rename,
   and delete them, with per-category line counts and totals. Deleting a category
@@ -54,6 +56,7 @@ tracker built with Python/Tkinter.
 - The macOS build targets Apple Silicon (arm64).
 - The read-aloud feature needs eSpeak on Linux (`sudo apt-get install espeak`).
 
-[Unreleased]: https://github.com/mediaswing/the-simple-budget/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/mediaswing/the-simple-budget/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/mediaswing/the-simple-budget/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/mediaswing/the-simple-budget/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/mediaswing/the-simple-budget/releases/tag/v0.1.0
