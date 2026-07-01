@@ -39,6 +39,25 @@ are disabled and the transcript explains how to enable them.
 python3 budget_app.py
 ```
 
+## Standalone binaries
+
+Prebuilt Windows, macOS, and Linux binaries are produced by the
+`Build binaries` GitHub Actions workflow (see `.github/workflows/build.yml`) and
+attached to each tagged release. To build one yourself for the current OS:
+
+```sh
+pip install pyinstaller pyttsx3
+pyinstaller --noconfirm --clean TheSimpleBudget.spec
+```
+
+The result appears in `dist/` (a `TheSimpleBudget.app` on macOS, a
+`TheSimpleBudget/` folder containing the executable on Windows/Linux).
+PyInstaller does **not** cross-compile — each platform's binary must be built on
+that platform (which is what the CI workflow does).
+
+> **Linux note:** the read-aloud feature uses eSpeak, so Linux users need it
+> installed (`sudo apt-get install espeak`).
+
 ## Keyboard shortcuts
 
 ### Navigation
