@@ -41,6 +41,10 @@ try:
 except ImportError:  # pragma: no cover - depends on the environment
     pymysql = None
 
+# Duplicate-key errors differ per backend; catch both to give the same message.
+INTEGRITY_ERRORS = (sqlite3.IntegrityError,) + (
+    (pymysql.err.IntegrityError,) if pymysql is not None else ())
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(HERE, "budget.db")
 INI_PATH = os.path.join(HERE, "budget.ini")
@@ -297,7 +301,7 @@ class BudgetDB:
         if self.backend == "mariadb":
             items = (
                 "CREATE TABLE IF NOT EXISTS budget_items ("
-                " id INT PRIMARY KEY,"
+                " id INT PRIMARY KEY AUTO_INCREMENT,"
                 " category VARCHAR(255) NOT NULL UNIQUE)")
             lines = (
                 "CREATE TABLE IF NOT EXISTS budget_lines ("
@@ -324,6 +328,25 @@ class BudgetDB:
                 " ON DELETE CASCADE)")
         self._exec(items)
         self._exec(lines)
+        if self.backend == "mariadb":
+            self._ensure_autoincrement()
+
+    def _ensure_autoincrement(self):
+        """Backfill AUTO_INCREMENT on budget_items.id for MariaDB databases
+        created by an earlier version (before categories could be added).
+
+        ``CREATE TABLE IF NOT EXISTS`` leaves an existing table untouched, so a
+        v0.2.0 database keeps its plain ``INT PRIMARY KEY`` and can't accept a
+        category insert without an explicit id. Detect that and fix it in place.
+        """
+        rows = self._query(
+            "SELECT EXTRA FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'budget_items' "
+            "AND COLUMN_NAME = 'id'")
+        extra = (rows[0]["EXTRA"] if rows else "") or ""
+        if "auto_increment" not in extra.lower():
+            self._exec(
+                "ALTER TABLE budget_items MODIFY id INT NOT NULL AUTO_INCREMENT")
 
     def _seed_categories(self):
         verb = "INSERT IGNORE" if self.backend == "mariadb" else "INSERT OR IGNORE"
@@ -338,6 +361,55 @@ class BudgetDB:
         rows = self._query(
             "SELECT id, category FROM budget_items ORDER BY category")
         return [(r["id"], r["category"]) for r in rows]
+
+    def categories_with_stats(self):
+        """Return [{id, name, lines, total}, ...] for the category manager."""
+        rows = self._query(
+            """
+            SELECT i.id AS id, i.category AS name,
+                   COUNT(l.id) AS lines, COALESCE(SUM(l.price), 0) AS total
+            FROM budget_items i
+            LEFT JOIN budget_lines l ON l.category = i.id
+            GROUP BY i.id, i.category
+            ORDER BY i.category
+            """
+        )
+        return [
+            {"id": r["id"], "name": r["name"],
+             "lines": int(r["lines"]), "total": float(r["total"] or 0)}
+            for r in rows
+        ]
+
+    def add_category(self, name):
+        """Create a new category. Raises ValueError if the name is taken."""
+        try:
+            self._exec(
+                "INSERT INTO budget_items (category) VALUES ({})".format(self._ph),
+                (name,))
+        except INTEGRITY_ERRORS:
+            raise ValueError("A category named '{}' already exists.".format(name))
+
+    def rename_category(self, cat_id, name):
+        """Rename a category. Raises ValueError if the new name is taken."""
+        try:
+            self._exec(
+                "UPDATE budget_items SET category={0} WHERE id={0}".format(self._ph),
+                (name, cat_id))
+        except INTEGRITY_ERRORS:
+            raise ValueError("A category named '{}' already exists.".format(name))
+
+    def delete_category(self, cat_id):
+        """Delete a category. Refuses if any budget lines still use it."""
+        n = self._query(
+            "SELECT COUNT(*) AS n FROM budget_lines WHERE category={}".format(
+                self._ph),
+            (cat_id,))[0]["n"]
+        if n:
+            raise ValueError(
+                "This category is used by {} budget line{}. Reassign or delete "
+                "those first.".format(n, "" if n == 1 else "s"))
+        self._exec("DELETE FROM budget_items WHERE id={}".format(self._ph),
+                   (cat_id,))
 
     # -- lines -------------------------------------------------------------- #
     def lines(self):
@@ -423,6 +495,163 @@ class BudgetDB:
             ]
 
         raise ValueError("unknown group: %r" % group)
+
+
+# --------------------------------------------------------------------------- #
+# Categories tab
+# --------------------------------------------------------------------------- #
+class CategoriesTab(ttk.Frame):
+    """Add / rename / delete the user's own budget categories."""
+
+    def __init__(self, master, db, on_change):
+        super().__init__(master, padding=10)
+        self.db = db
+        self.on_change = on_change  # called after any change (refresh siblings)
+        self.selected_id = None
+
+        self._build_form()
+        self._build_table()
+        self._bind_keys()
+        self.refresh()
+
+    def _build_form(self):
+        form = ttk.LabelFrame(self, text="Category", padding=10)
+        form.pack(fill="x")
+
+        ttk.Label(form, text="Name").grid(row=0, column=0, sticky="w",
+                                          padx=4, pady=4)
+        self.name_var = tk.StringVar()
+        self.name_entry = ttk.Entry(form, textvariable=self.name_var, width=30)
+        self.name_entry.grid(row=0, column=1, padx=4, pady=4)
+
+        btns = ttk.Frame(form)
+        btns.grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.add_btn = ttk.Button(btns, text="Add (Ctrl+S)", command=self.add,
+                                  underline=0)
+        self.add_btn.pack(side="left", padx=(0, 6))
+        self.rename_btn = ttk.Button(
+            btns, text="Rename selected (Ctrl+S)", command=self.rename,
+            state="disabled")
+        self.rename_btn.pack(side="left", padx=6)
+        self.delete_btn = ttk.Button(
+            btns, text="Delete selected (Del)", command=self.delete,
+            state="disabled")
+        self.delete_btn.pack(side="left", padx=6)
+        ttk.Button(btns, text="Clear (Esc)", command=self.clear_form).pack(
+            side="left", padx=6)
+
+    def _build_table(self):
+        wrap = ttk.Frame(self)
+        wrap.pack(fill="both", expand=True, pady=(10, 0))
+
+        cols = ("name", "lines", "total")
+        self.tree = ttk.Treeview(wrap, columns=cols, show="headings",
+                                 selectmode="browse")
+        headings = {"name": "Category", "lines": "Lines", "total": "Total spend"}
+        widths = {"name": 240, "lines": 80, "total": 140}
+        for c in cols:
+            self.tree.heading(c, text=headings[c])
+            anchor = "w" if c == "name" else "e"
+            self.tree.column(c, width=widths[c], anchor=anchor)
+        self.tree.pack(side="left", fill="both", expand=True)
+
+        sb = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
+        sb.pack(side="right", fill="y")
+        self.tree.configure(yscrollcommand=sb.set)
+        self.tree.bind("<<TreeviewSelect>>", self.on_select)
+        self.tree.bind("<Delete>", lambda _e: self.delete())
+
+    def _bind_keys(self):
+        def _clear(_e):
+            self.clear_form()
+            return "break"
+
+        self.name_entry.bind("<Return>", lambda _e: self.save())
+        self.name_entry.bind("<Escape>", _clear)
+
+    # -- helpers ------------------------------------------------------------ #
+    def refresh(self):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        for row in self.db.categories_with_stats():
+            self.tree.insert(
+                "", "end", iid=str(row["id"]),
+                values=(row["name"], row["lines"], gbp(row["total"])))
+
+    # -- actions ------------------------------------------------------------ #
+    def save(self):
+        """Rename the selected category, or add a new one (Ctrl+S / Enter)."""
+        if self.selected_id is None:
+            self.add()
+        else:
+            self.rename()
+
+    def focus_new(self):
+        self.clear_form()
+        self.name_entry.focus_set()
+
+    def _read_name(self):
+        name = self.name_var.get().strip()
+        if not name:
+            raise ValueError("Please enter a category name.")
+        return name
+
+    def add(self):
+        try:
+            name = self._read_name()
+            self.db.add_category(name)
+        except ValueError as e:
+            messagebox.showerror("Invalid input", str(e))
+            return
+        self.clear_form()
+        self.refresh()
+        self.on_change()
+
+    def rename(self):
+        if self.selected_id is None:
+            return
+        try:
+            name = self._read_name()
+            self.db.rename_category(self.selected_id, name)
+        except ValueError as e:
+            messagebox.showerror("Invalid input", str(e))
+            return
+        self.clear_form()
+        self.refresh()
+        self.on_change()
+
+    def delete(self):
+        if self.selected_id is None:
+            return
+        name = self.name_var.get().strip()
+        if not messagebox.askyesno(
+                "Delete", "Delete the category '{}'?".format(name)):
+            return
+        try:
+            self.db.delete_category(self.selected_id)
+        except ValueError as e:
+            messagebox.showerror("Cannot delete", str(e))
+            return
+        self.clear_form()
+        self.refresh()
+        self.on_change()
+
+    def on_select(self, _event=None):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        self.selected_id = int(sel[0])
+        self.name_var.set(self.tree.item(sel[0], "values")[0])
+        self.rename_btn.config(state="normal")
+        self.delete_btn.config(state="normal")
+
+    def clear_form(self):
+        self.selected_id = None
+        if self.tree.selection():
+            self.tree.selection_remove(self.tree.selection())
+        self.name_var.set("")
+        self.rename_btn.config(state="disabled")
+        self.delete_btn.config(state="disabled")
 
 
 # --------------------------------------------------------------------------- #
@@ -904,12 +1133,15 @@ class BudgetApp(tk.Tk):
         self.nb.pack(fill="both", expand=True)
 
         self.chart_tab = ChartTab(self.nb, self.db, speaker=self.speaker)
-        self.data_tab = DataTab(self.nb, self.db, on_change=self.chart_tab.draw)
+        self.data_tab = DataTab(self.nb, self.db, on_change=self._data_changed)
+        self.categories_tab = CategoriesTab(
+            self.nb, self.db, on_change=self._categories_changed)
 
-        # `underline` gives each tab a mnemonic (Alt+D / Alt+C); enable_traversal
+        # `underline` gives each tab a mnemonic (Alt+D/C/G); enable_traversal
         # activates those plus Ctrl+Tab / Ctrl+Shift+Tab to cycle tabs.
         self.nb.add(self.data_tab, text="Data", underline=0)
         self.nb.add(self.chart_tab, text="Chart", underline=0)
+        self.nb.add(self.categories_tab, text="Categories", underline=4)
         self.nb.enable_traversal()
 
         self._build_menu()
@@ -930,12 +1162,12 @@ class BudgetApp(tk.Tk):
         menubar.add_cascade(label="File", menu=filemenu, underline=0)
 
         editmenu = tk.Menu(menubar, tearoff=0)
-        editmenu.add_command(label="New line", accelerator="Ctrl+N",
-                             command=self._new_line)
-        editmenu.add_command(label="Save line", accelerator="Ctrl+S",
-                             command=self.data_tab.save)
-        editmenu.add_command(label="Delete line", accelerator="Del",
-                             command=self.data_tab.delete)
+        editmenu.add_command(label="New entry", accelerator="Ctrl+N",
+                             command=self._editor_new)
+        editmenu.add_command(label="Save entry", accelerator="Ctrl+S",
+                             command=self._editor_save)
+        editmenu.add_command(label="Delete entry", accelerator="Del",
+                             command=self._editor_delete)
         menubar.add_cascade(label="Edit", menu=editmenu, underline=0)
 
         viewmenu = tk.Menu(menubar, tearoff=0)
@@ -943,6 +1175,8 @@ class BudgetApp(tk.Tk):
                              command=lambda: self._select_tab(0))
         viewmenu.add_command(label="Chart tab", accelerator="Ctrl+2",
                              command=lambda: self._select_tab(1))
+        viewmenu.add_command(label="Categories tab", accelerator="Ctrl+3",
+                             command=lambda: self._select_tab(2))
         viewmenu.add_command(label="Refresh chart", accelerator="Ctrl+R",
                              command=self.chart_tab.draw)
         menubar.add_cascade(label="View", menu=viewmenu, underline=0)
@@ -965,22 +1199,53 @@ class BudgetApp(tk.Tk):
     def _bind_shortcuts(self):
         # Bound on the toplevel with bind_all so they work whatever has focus.
         self.bind_all("<Control-q>", lambda _e: self.destroy())
-        self.bind_all("<Control-n>", lambda _e: self._new_line())
-        self.bind_all("<Control-s>", lambda _e: self.data_tab.save())
+        self.bind_all("<Control-n>", lambda _e: self._editor_new())
+        self.bind_all("<Control-s>", lambda _e: self._editor_save())
         self.bind_all("<Control-r>", lambda _e: self.chart_tab.draw())
         self.bind_all("<Control-t>", lambda _e: self._read_chart())
         self.bind_all("<Control-Key-1>", lambda _e: self._select_tab(0))
         self.bind_all("<Control-Key-2>", lambda _e: self._select_tab(1))
+        self.bind_all("<Control-Key-3>", lambda _e: self._select_tab(2))
         self.bind_all("<Escape>", lambda _e: self.speaker.stop())
         self.bind_all("<F1>", lambda _e: self._show_shortcuts())
 
-    def _select_tab(self, index):
-        self.nb.select(index)
+    # -- cross-tab refresh -------------------------------------------------- #
+    def _data_changed(self):
+        """A budget line changed: update the chart and category totals."""
+        self.chart_tab.draw()
+        self.categories_tab.refresh()
+
+    def _categories_changed(self):
+        """A category changed: update the Data tab's picker and the chart."""
+        self.data_tab.refresh()
+        self.chart_tab.draw()
+
+    # -- editing shortcuts act on whichever editable tab is showing --------- #
+    def _current_editor(self):
+        editors = {0: self.data_tab, 2: self.categories_tab}
+        return editors.get(self.nb.index(self.nb.select()))
+
+    def _editor_save(self):
+        editor = self._current_editor()
+        if editor:
+            editor.save()
         return "break"
 
-    def _new_line(self):
-        self._select_tab(0)
-        self.data_tab.focus_new()
+    def _editor_new(self):
+        editor = self._current_editor()
+        if editor is None:  # e.g. on the Chart tab -> default to Data
+            self._select_tab(0)
+            editor = self.data_tab
+        editor.focus_new()
+        return "break"
+
+    def _editor_delete(self):
+        editor = self._current_editor()
+        if editor:
+            editor.delete()
+
+    def _select_tab(self, index):
+        self.nb.select(index)
         return "break"
 
     def _read_chart(self):
@@ -996,12 +1261,13 @@ class BudgetApp(tk.Tk):
             "Navigation\n"
             "  Ctrl+1 / Alt+D   Data tab\n"
             "  Ctrl+2 / Alt+C   Chart tab\n"
+            "  Ctrl+3 / Alt+G   Categories tab\n"
             "  Ctrl+Tab         Next tab\n"
             "  Tab / Shift+Tab  Move between controls\n\n"
-            "Editing (Data tab)\n"
-            "  Ctrl+N           New line (clear form)\n"
-            "  Ctrl+S / Enter   Add or update the line\n"
-            "  Del              Delete the selected line\n"
+            "Editing (Data & Categories tabs)\n"
+            "  Ctrl+N           New entry (clear form)\n"
+            "  Ctrl+S / Enter   Add or update the entry\n"
+            "  Del              Delete the selected entry\n"
             "  Esc              Clear the form\n\n"
             "Accessibility (Chart tab)\n"
             "  Ctrl+T           Read the chart aloud\n"

@@ -9,6 +9,18 @@ section below as the GitHub Release notes.
 
 ## [Unreleased]
 
+### Added
+- **Categories tab** for managing your own spending categories: add, rename,
+  and delete them, with per-category line counts and totals. Deleting a category
+  that still has budget lines is blocked to prevent accidental data loss. Adding
+  and renaming go through the same keyboard shortcuts as the Data tab (`Ctrl+3` /
+  `Alt+G` to reach the tab).
+
+### Changed
+- The MariaDB `budget_items` table now uses `AUTO_INCREMENT` so new categories
+  get an id automatically. Databases created by v0.2.0 are migrated in place on
+  startup (a guarded `ALTER TABLE`), so existing central databases keep working.
+
 ## [0.2.0] - 2026-07-01
 
 ### Added

@@ -12,6 +12,8 @@ standard Python install with Tk.
 
 - **Data tab** — add, edit, and delete budget lines (store, price, date,
   category). Spending categories are seeded on first run.
+- **Categories tab** — add, rename, and delete your own spending categories
+  (deletion is blocked while a category still has budget lines).
 - **Chart tab** — a column graph of total spend (GBP), grouped by **category**,
   **year**, or **month**.
 - **Accessibility** — full keyboard control, mnemonics, a menu bar, and a
@@ -94,16 +96,20 @@ that platform (which is what the CI workflow does).
 | --- | --- |
 | `Ctrl+1` / `Alt+D` | Data tab |
 | `Ctrl+2` / `Alt+C` | Chart tab |
+| `Ctrl+3` / `Alt+G` | Categories tab |
 | `Ctrl+Tab` | Next tab |
 | `Tab` / `Shift+Tab` | Move between controls |
 
-### Editing (Data tab)
+### Editing (Data & Categories tabs)
 | Shortcut | Action |
 | --- | --- |
-| `Ctrl+N` | New line (clear the form and focus the first field) |
-| `Ctrl+S` / `Enter` | Add or update the line |
-| `Del` | Delete the selected line |
+| `Ctrl+N` | New entry (clear the form and focus the first field) |
+| `Ctrl+S` / `Enter` | Add or update the entry |
+| `Del` | Delete the selected entry |
 | `Esc` | Clear the form |
+
+The editing shortcuts act on whichever of the Data or Categories tabs is
+showing.
 
 ### Accessibility (Chart tab)
 | Shortcut | Action |
