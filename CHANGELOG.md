@@ -9,6 +9,15 @@ section below as the GitHub Release notes.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-01
+
+### Added
+- Optional central **MariaDB** backend via a `budget.ini` config file
+  (`configparser` + `pymysql`). The app uses its local SQLite database by
+  default, switches to MariaDB when credentials are supplied, shows the active
+  database in the title bar, and falls back to SQLite (with a warning) if the
+  server is unreachable or `pymysql` is missing. See `budget.ini.example`.
+
 ## [0.1.0] - 2026-07-01
 
 First release of **The Simple Budget** — a self-contained desktop budget
@@ -33,5 +42,6 @@ tracker built with Python/Tkinter.
 - The macOS build targets Apple Silicon (arm64).
 - The read-aloud feature needs eSpeak on Linux (`sudo apt-get install espeak`).
 
-[Unreleased]: https://github.com/mediaswing/the-simple-budget/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/mediaswing/the-simple-budget/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/mediaswing/the-simple-budget/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/mediaswing/the-simple-budget/releases/tag/v0.1.0

@@ -1,0 +1,20 @@
+# Copy this file to "budget.ini" to change where data is stored.
+#
+# With no budget.ini present, the app uses its own local SQLite database
+# (budget.db). Provide MariaDB details below to use a central server instead.
+# Requires the pymysql package:  pip install pymysql
+
+[database]
+# Optional. "sqlite" (default) or "mariadb"/"mysql". If left blank, MariaDB is
+# used automatically when host, user, and database are all filled in below.
+backend = mariadb
+
+host = db.example.com
+port = 3306
+user = budget
+password = your-password-here
+database = budget
+
+# For the SQLite backend you may optionally override the database file path:
+# backend = sqlite
+# path = /path/to/budget.db

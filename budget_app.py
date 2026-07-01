@@ -19,6 +19,7 @@ is a standard Python install with Tk (no third-party packages needed).
 import os
 import sqlite3
 import threading
+import configparser
 import datetime as dt
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -31,7 +32,18 @@ try:
 except ImportError:  # pragma: no cover - depends on the environment
     pyttsx3 = None
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "budget.db")
+# pymysql is only needed when the user points budget.ini at a central MariaDB
+# server. It is optional: without it (or without a config file) the app uses its
+# own local SQLite database.
+try:
+    import pymysql
+    import pymysql.cursors
+except ImportError:  # pragma: no cover - depends on the environment
+    pymysql = None
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(HERE, "budget.db")
+INI_PATH = os.path.join(HERE, "budget.ini")
 
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -157,63 +169,184 @@ class Speaker:
 
 
 # --------------------------------------------------------------------------- #
+# Database configuration
+# --------------------------------------------------------------------------- #
+class DBConfig:
+    """Resolved database choice: which backend and how to connect to it."""
+
+    def __init__(self, backend, params, description):
+        self.backend = backend          # "sqlite" or "mariadb"
+        self.params = params            # dict of connection parameters
+        self.description = description  # human-readable, for the UI
+
+
+def load_db_config(ini_path=INI_PATH):
+    """Decide which database to use, based on an optional INI file.
+
+    The file (default ``budget.ini`` next to the app) may contain::
+
+        [database]
+        backend = mariadb          ; optional: "sqlite" or "mariadb"
+        host = db.example.com
+        port = 3306
+        user = budget
+        password = secret
+        database = budget
+
+    If ``backend`` is omitted the choice is inferred: MariaDB is used when
+    host, user, and database are all provided, otherwise the internal SQLite
+    database. With no config file at all, SQLite is always used.
+    """
+    parser = configparser.ConfigParser()
+    if not parser.read(ini_path) or not parser.has_section("database"):
+        return DBConfig("sqlite", {"path": DB_PATH}, "internal database (SQLite)")
+
+    sec = parser["database"]
+    backend = sec.get("backend", "").strip().lower()
+    host = sec.get("host", "").strip()
+    user = sec.get("user", "").strip()
+    database = sec.get("database", "").strip()
+    password = sec.get("password", "")
+    port = sec.getint("port", 3306)
+    has_credentials = bool(host and user and database)
+
+    want_mariadb = backend in ("mariadb", "mysql") or (
+        not backend and has_credentials)
+
+    if want_mariadb:
+        if not has_credentials:
+            raise ValueError(
+                "budget.ini requests MariaDB but is missing host/user/database.")
+        params = dict(host=host, port=port, user=user,
+                      password=password, database=database)
+        return DBConfig("mariadb", params,
+                        "MariaDB ({}/{})".format(host, database))
+
+    path = sec.get("path", "").strip() or DB_PATH
+    return DBConfig("sqlite", {"path": path}, "internal database (SQLite)")
+
+
+def open_db(ini_path=INI_PATH):
+    """Open the configured database, falling back to SQLite on any problem.
+
+    Returns ``(db, warning)`` where *warning* is None, or a message describing
+    why the app fell back to the internal database (shown to the user).
+    """
+    cfg = load_db_config(ini_path)
+    sqlite_cfg = DBConfig("sqlite", {"path": DB_PATH}, "internal database (SQLite)")
+
+    if cfg.backend != "mariadb":
+        return BudgetDB(cfg), None
+
+    if pymysql is None:
+        return (BudgetDB(sqlite_cfg),
+                "budget.ini requests MariaDB but the 'pymysql' package is not "
+                "installed. Using the internal database instead.\n\n"
+                "Install it with:  pip install pymysql")
+    try:
+        return BudgetDB(cfg), None
+    except Exception as e:  # connection / auth / schema errors
+        return (BudgetDB(sqlite_cfg),
+                "Could not connect to MariaDB ({}): {}\n\n"
+                "Using the internal database instead.".format(
+                    cfg.description, e))
+
+
+# --------------------------------------------------------------------------- #
 # Data access
 # --------------------------------------------------------------------------- #
 class BudgetDB:
-    """Thin wrapper around the SQLite database."""
+    """Backend-agnostic wrapper over SQLite or MariaDB (same public API)."""
 
-    def __init__(self, path=DB_PATH):
-        self.conn = sqlite3.connect(path)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA foreign_keys = ON")
+    def __init__(self, config=None):
+        self.config = config or DBConfig(
+            "sqlite", {"path": DB_PATH}, "internal database (SQLite)")
+        self.backend = self.config.backend
+        if self.backend == "mariadb":
+            self._ph = "%s"
+            self.conn = pymysql.connect(
+                cursorclass=pymysql.cursors.DictCursor,
+                charset="utf8mb4", autocommit=False, **self.config.params)
+        else:
+            self._ph = "?"
+            self.conn = sqlite3.connect(self.config.params["path"])
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA foreign_keys = ON")
         self._create_schema()
         self._seed_categories()
 
-    def _create_schema(self):
-        cur = self.conn.cursor()
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS budget_items (
-                id       INTEGER PRIMARY KEY,
-                category TEXT NOT NULL UNIQUE
-            )
-            """
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS budget_lines (
-                id       INTEGER PRIMARY KEY AUTOINCREMENT,
-                store    TEXT    NOT NULL,
-                price    REAL    NOT NULL,
-                date     TEXT    NOT NULL,   -- ISO 'YYYY-MM-DD'
-                category INTEGER NOT NULL,
-                FOREIGN KEY (category) REFERENCES budget_items(id) ON DELETE CASCADE
-            )
-            """
-        )
+    # -- low-level helpers -------------------------------------------------- #
+    def _query(self, sql, params=None):
+        """Run a SELECT and return a list of dict-like rows."""
+        if self.backend == "mariadb":
+            with self.conn.cursor() as cur:
+                cur.execute(sql, params)  # None => no % substitution
+                return cur.fetchall()
+        return self.conn.execute(sql, params or ()).fetchall()
+
+    def _exec(self, sql, params=None):
+        """Run a write statement and commit."""
+        if self.backend == "mariadb":
+            with self.conn.cursor() as cur:
+                cur.execute(sql, params)
+        else:
+            self.conn.execute(sql, params or ())
         self.conn.commit()
 
+    def _create_schema(self):
+        if self.backend == "mariadb":
+            items = (
+                "CREATE TABLE IF NOT EXISTS budget_items ("
+                " id INT PRIMARY KEY,"
+                " category VARCHAR(255) NOT NULL UNIQUE)")
+            lines = (
+                "CREATE TABLE IF NOT EXISTS budget_lines ("
+                " id INT PRIMARY KEY AUTO_INCREMENT,"
+                " store VARCHAR(255) NOT NULL,"
+                " price DECIMAL(10,2) NOT NULL,"
+                " date DATE NOT NULL,"
+                " category INT NOT NULL,"
+                " FOREIGN KEY (category) REFERENCES budget_items(id)"
+                " ON DELETE CASCADE)")
+        else:
+            items = (
+                "CREATE TABLE IF NOT EXISTS budget_items ("
+                " id INTEGER PRIMARY KEY,"
+                " category TEXT NOT NULL UNIQUE)")
+            lines = (
+                "CREATE TABLE IF NOT EXISTS budget_lines ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " store TEXT NOT NULL,"
+                " price REAL NOT NULL,"
+                " date TEXT NOT NULL,"
+                " category INTEGER NOT NULL,"
+                " FOREIGN KEY (category) REFERENCES budget_items(id)"
+                " ON DELETE CASCADE)")
+        self._exec(items)
+        self._exec(lines)
+
     def _seed_categories(self):
-        cur = self.conn.cursor()
+        verb = "INSERT IGNORE" if self.backend == "mariadb" else "INSERT OR IGNORE"
+        sql = "{} INTO budget_items (id, category) VALUES ({}, {})".format(
+            verb, self._ph, self._ph)
         for cid, name in SEED_CATEGORIES:
-            cur.execute(
-                "INSERT OR IGNORE INTO budget_items (id, category) VALUES (?, ?)",
-                (cid, name),
-            )
-        self.conn.commit()
+            self._exec(sql, (cid, name))
 
     # -- categories --------------------------------------------------------- #
     def categories(self):
         """Return list of (id, category) ordered by name."""
-        rows = self.conn.execute(
-            "SELECT id, category FROM budget_items ORDER BY category"
-        ).fetchall()
+        rows = self._query(
+            "SELECT id, category FROM budget_items ORDER BY category")
         return [(r["id"], r["category"]) for r in rows]
 
     # -- lines -------------------------------------------------------------- #
     def lines(self):
-        """Return all budget lines joined with their category name."""
-        return self.conn.execute(
+        """Return all budget lines joined with their category name.
+
+        Rows are normalised to plain dicts so the two backends look identical
+        to callers (notably: dates as ISO strings, prices as floats).
+        """
+        rows = self._query(
             """
             SELECT l.id, l.store, l.price, l.date,
                    l.category AS category_id, i.category AS category_name
@@ -221,27 +354,32 @@ class BudgetDB:
             JOIN budget_items i ON i.id = l.category
             ORDER BY l.date DESC, l.id DESC
             """
-        ).fetchall()
+        )
+        return [
+            {"id": r["id"], "store": r["store"],
+             "price": float(r["price"]), "date": str(r["date"])[:10],
+             "category_id": r["category_id"],
+             "category_name": r["category_name"]}
+            for r in rows
+        ]
 
     def add_line(self, store, price, date, category_id):
-        self.conn.execute(
+        cols = ", ".join([self._ph] * 4)
+        self._exec(
             "INSERT INTO budget_lines (store, price, date, category) "
-            "VALUES (?, ?, ?, ?)",
-            (store, price, date, category_id),
-        )
-        self.conn.commit()
+            "VALUES ({})".format(cols),
+            (store, price, date, category_id))
 
     def update_line(self, line_id, store, price, date, category_id):
-        self.conn.execute(
-            "UPDATE budget_lines SET store=?, price=?, date=?, category=? "
-            "WHERE id=?",
-            (store, price, date, category_id, line_id),
-        )
-        self.conn.commit()
+        ph = self._ph
+        self._exec(
+            "UPDATE budget_lines SET store={0}, price={0}, date={0}, "
+            "category={0} WHERE id={0}".format(ph),
+            (store, price, date, category_id, line_id))
 
     def delete_line(self, line_id):
-        self.conn.execute("DELETE FROM budget_lines WHERE id=?", (line_id,))
-        self.conn.commit()
+        self._exec("DELETE FROM budget_lines WHERE id={}".format(self._ph),
+                   (line_id,))
 
     # -- aggregation for the chart ----------------------------------------- #
     def totals_by(self, group):
@@ -249,41 +387,38 @@ class BudgetDB:
 
         group is one of 'category', 'year', 'month'.
         """
+        maria = self.backend == "mariadb"
+
         if group == "category":
-            rows = self.conn.execute(
+            rows = self._query(
                 """
                 SELECT i.category AS label, COALESCE(SUM(l.price), 0) AS total
                 FROM budget_lines l
                 JOIN budget_items i ON i.id = l.category
-                GROUP BY i.id
+                GROUP BY i.id, i.category
                 ORDER BY total DESC
                 """
-            ).fetchall()
-            return [(r["label"], r["total"]) for r in rows]
+            )
+            return [(r["label"], float(r["total"] or 0)) for r in rows]
 
         if group == "year":
-            rows = self.conn.execute(
-                """
-                SELECT strftime('%Y', date) AS label, SUM(price) AS total
-                FROM budget_lines
-                GROUP BY label
-                ORDER BY label
-                """
-            ).fetchall()
-            return [(r["label"], r["total"]) for r in rows]
+            year = "DATE_FORMAT(date, '%Y')" if maria else "strftime('%Y', date)"
+            rows = self._query(
+                "SELECT {} AS label, SUM(price) AS total "
+                "FROM budget_lines GROUP BY label ORDER BY label".format(year)
+            )
+            return [(r["label"], float(r["total"] or 0)) for r in rows]
 
         if group == "month":
-            rows = self.conn.execute(
-                """
-                SELECT strftime('%m', date) AS mnum, SUM(price) AS total
-                FROM budget_lines
-                GROUP BY mnum
-                """
-            ).fetchall()
-            by_month = {r["mnum"]: r["total"] for r in rows}
+            mon = "DATE_FORMAT(date, '%m')" if maria else "strftime('%m', date)"
+            rows = self._query(
+                "SELECT {} AS mnum, SUM(price) AS total "
+                "FROM budget_lines GROUP BY mnum".format(mon)
+            )
+            by_month = {r["mnum"]: float(r["total"] or 0) for r in rows}
             # Show all 12 months in calendar order (0 where there's no spend).
             return [
-                (MONTHS[i], by_month.get("{:02d}".format(i + 1), 0) or 0)
+                (MONTHS[i], by_month.get("{:02d}".format(i + 1), 0))
                 for i in range(12)
             ]
 
@@ -759,8 +894,11 @@ class BudgetApp(tk.Tk):
         self.geometry("820x600")
         self.minsize(680, 480)
 
-        self.db = BudgetDB()
+        self.db, db_warning = open_db()
         self.speaker = Speaker()
+
+        # Show which database is in use, so a central-vs-local choice is visible.
+        self.title("Budget Tracker — " + self.db.config.description)
 
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True)
@@ -776,6 +914,11 @@ class BudgetApp(tk.Tk):
 
         self._build_menu()
         self._bind_shortcuts()
+
+        # If we asked for MariaDB but fell back to SQLite, tell the user why.
+        if db_warning:
+            self.after(200, lambda: messagebox.showwarning(
+                "Database", db_warning))
 
     # -- menu & shortcuts --------------------------------------------------- #
     def _build_menu(self):

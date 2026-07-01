@@ -1,6 +1,9 @@
 # Generated at runtime
 budget.db
 
+# Local config with database credentials (use budget.ini.example as a template)
+budget.ini
+
 # Python
 __pycache__/
 *.py[cod]

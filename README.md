@@ -19,19 +19,48 @@ standard Python install with Tk.
 - **Read chart aloud** — the chart can be spoken as plain-language text via
   [`pyttsx3`](https://pypi.org/project/pyttsx3/) for visually impaired users,
   with a live on-screen transcript, a **voice picker**, and a **speed slider**.
+- **Local or central database** — use the built-in SQLite database, or point the
+  app at a shared MariaDB server via a config file.
 
 ## Requirements
 
 - Python 3 with Tk (bundled with most Python installs; `python3 -m tkinter`
   should open a test window).
 - Optional: `pyttsx3` for the read-aloud feature.
+- Optional: `pymysql` for the MariaDB backend.
 
 ```sh
-pip install pyttsx3
+pip install pyttsx3 pymysql
 ```
 
 If `pyttsx3` is not installed the app still runs normally — the speech controls
 are disabled and the transcript explains how to enable them.
+
+## Database (local SQLite or central MariaDB)
+
+By default the app uses its own local SQLite database (`budget.db`). To share
+data across machines via a central **MariaDB** server, copy
+[`budget.ini.example`](budget.ini.example) to `budget.ini` and fill in your
+connection details:
+
+```ini
+[database]
+backend = mariadb
+host = db.example.com
+port = 3306
+user = budget
+password = your-password-here
+database = budget
+```
+
+- The active database is shown in the window's title bar.
+- If `backend` is omitted, MariaDB is used automatically when `host`, `user`,
+  and `database` are all provided; otherwise SQLite is used.
+- MariaDB requires `pip install pymysql`. If the package is missing or the
+  server can't be reached, the app warns and falls back to the local database so
+  it always starts.
+- `budget.ini` holds credentials and is git-ignored — commit only the
+  `.example`.
 
 ## Running
 
