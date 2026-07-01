@@ -1,0 +1,6 @@
+# Generated at runtime
+budget.db
+
+# Python
+__pycache__/
+*.py[cod]
