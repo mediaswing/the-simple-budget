@@ -1,0 +1,37 @@
+# Changelog
+
+All notable changes to this project are documented here. The format is based on
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
+adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+On each tagged release (`vX.Y.Z`), the CI workflow publishes the matching
+section below as the GitHub Release notes.
+
+## [Unreleased]
+
+## [0.1.0] - 2026-07-01
+
+First release of **The Simple Budget** — a self-contained desktop budget
+tracker built with Python/Tkinter.
+
+### Added
+- Track spending: add, edit, and delete budget lines (store, price, date,
+  category) in a table.
+- Chart tab: total spend (GBP) as a column graph, grouped by category, year, or
+  month.
+- Full keyboard accessibility: menu bar, tab mnemonics, and shortcuts for every
+  action, so the app can be driven entirely without a mouse.
+- Read chart aloud: the chart is spoken as plain-language text via `pyttsx3` for
+  visually impaired users, with a live on-screen transcript, a voice picker, and
+  a speaking-speed slider.
+- Cross-platform standalone binaries (Windows, macOS, Linux) built by a
+  GitHub Actions workflow and attached to each tagged release.
+
+### Notes
+- Binaries are unsigned: macOS Gatekeeper and Windows SmartScreen will warn on
+  first launch (right-click → Open on macOS; More info → Run anyway on Windows).
+- The macOS build targets Apple Silicon (arm64).
+- The read-aloud feature needs eSpeak on Linux (`sudo apt-get install espeak`).
+
+[Unreleased]: https://github.com/mediaswing/the-simple-budget/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/mediaswing/the-simple-budget/releases/tag/v0.1.0

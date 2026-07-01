@@ -56,6 +56,7 @@ jobs:
     permissions:
       contents: write  # required to create the release and upload assets
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -65,7 +66,23 @@ jobs:
           for d in */; do zip -r "../${d%/}.zip" "$d"; done
           cd ..
           ls -la *.zip
+      - name: Extract release notes from CHANGELOG
+        run: |
+          # Pull the section for this tag's version (v1.2.3 -> [1.2.3]) out of
+          # CHANGELOG.md and use it as the release body.
+          version="${GITHUB_REF_NAME#v}"
+          awk -v ver="$version" '
+            $0 ~ "^## \\[" ver "\\]" { grab = 1; next }
+            grab && /^## \[/         { exit }
+            grab && /^\[[^]]+\]: /   { next }   # skip link-reference defs
+            grab                     { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "Release ${GITHUB_REF_NAME}" > RELEASE_NOTES.md
+          fi
+          cat RELEASE_NOTES.md
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: RELEASE_NOTES.md
           files: "*.zip"
