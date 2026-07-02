@@ -9,6 +9,8 @@ section below as the GitHub Release notes.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-02
+
 ### Added
 - **Access control for Windows AD / Microsoft Entra.** An administrator can add
   an `[access]` section to `budget.ini` naming a security `group`; on a machine
