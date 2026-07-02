@@ -9,6 +9,20 @@ section below as the GitHub Release notes.
 
 ## [Unreleased]
 
+### Added
+- **Access control for Windows AD / Microsoft Entra.** An administrator can add
+  an `[access]` section to `budget.ini` naming a security `group`; on a machine
+  joined to an AD domain or to Microsoft Entra, only members of that group may
+  run the app (others get an "Access denied" message and the app exits). The
+  group is matched by name (`Group` or `DOMAIN\Group`) or by SID, read from the
+  user's Windows token. The check is skipped on standalone/non-Windows machines,
+  and `deny_on_error` (default `true`) controls fail-closed vs fail-open when
+  membership can't be determined.
+- MariaDB backend now creates the configured `database` if it doesn't exist yet
+  (via `CREATE DATABASE IF NOT EXISTS`), then creates the tables inside it. A
+  fresh server no longer needs the schema created by hand — the app bootstraps
+  it, given a user with the `CREATE` privilege.
+
 ## [0.4.0] - 2026-07-02
 
 ### Added

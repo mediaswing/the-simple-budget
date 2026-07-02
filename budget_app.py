@@ -17,10 +17,13 @@ is a standard Python install with Tk (no third-party packages needed).
 """
 
 import os
+import io
 import sys
+import csv
 import queue
 import sqlite3
 import threading
+import subprocess
 import configparser
 import datetime as dt
 import tkinter as tk
@@ -299,6 +302,134 @@ def open_db(ini_path=INI_PATH):
 
 
 # --------------------------------------------------------------------------- #
+# Access control (optional; Windows AD domain / Microsoft Entra)
+# --------------------------------------------------------------------------- #
+# Keeps the helper subprocesses from flashing a console window when the app runs
+# as a windowed (console=False) Windows binary. Empty (no-op) off Windows, where
+# CREATE_NO_WINDOW doesn't exist.
+_NO_WINDOW = ({"creationflags": subprocess.CREATE_NO_WINDOW}
+              if sys.platform == "win32" else {})
+
+
+class AccessPolicy:
+    """Who may run the app: membership of a named Windows security group."""
+
+    def __init__(self, group, deny_on_error=True):
+        self.group = group                  # required group (name or SID)
+        self.deny_on_error = deny_on_error  # fail closed if membership unknown
+
+
+def load_access_config(ini_path=INI_PATH):
+    """Read the optional ``[access]`` section of budget.ini.
+
+    Returns an :class:`AccessPolicy` when a ``group`` is configured, else
+    ``None`` (unrestricted)::
+
+        [access]
+        group = Budget-Users     ; required security group (name or SID)
+        deny_on_error = true     ; optional; deny if membership can't be checked
+    """
+    parser = configparser.ConfigParser()
+    if not parser.read(ini_path) or not parser.has_section("access"):
+        return None
+    sec = parser["access"]
+    group = sec.get("group", "").strip()
+    if not group:
+        return None
+    return AccessPolicy(group, sec.getboolean("deny_on_error", True))
+
+
+def windows_join_status():
+    """Return ``(domain_joined, entra_joined)`` for this Windows machine, or
+    ``None`` if the join state could not be determined.
+
+    Uses ``dsregcmd /status`` (Windows 10+), falling back to an AD-domain logon
+    heuristic. ``(False, False)`` means "determined: standalone"; ``None`` means
+    the check itself failed (dsregcmd missing/blocked/timed out) so the caller
+    can decide whether to fail open or closed.
+    """
+    try:
+        out = subprocess.run(["dsregcmd", "/status"], capture_output=True,
+                             text=True, timeout=10, **_NO_WINDOW)
+    except (OSError, subprocess.SubprocessError):
+        out = None
+    if out is not None and out.returncode == 0 and out.stdout:
+        domain = entra = False
+        for line in out.stdout.splitlines():
+            low = line.lower().replace(" ", "")
+            if "azureadjoined" in low:
+                entra = "yes" in low
+            elif "domainjoined" in low:
+                domain = "yes" in low
+        return domain, entra
+    # dsregcmd unavailable: a domain logon still exposes the DNS domain name.
+    if os.environ.get("USERDNSDOMAIN"):
+        return True, False
+    return None  # genuinely undeterminable
+
+
+def current_user_groups():
+    """Set of the current user's group identities (names and SIDs, lowercased),
+    or ``None`` if membership could not be determined.
+
+    Uses ``whoami /groups``; group names appear as ``DOMAIN\\Group`` and are
+    also stored bare (``group``). SIDs are included so an Entra cloud group can
+    be matched by its object SID when its name doesn't resolve locally.
+    """
+    try:
+        out = subprocess.run(["whoami", "/groups", "/fo", "csv", "/nh"],
+                             capture_output=True, text=True, timeout=10,
+                             **_NO_WINDOW)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0 or not out.stdout:
+        return None
+    ids = set()
+    for row in csv.reader(io.StringIO(out.stdout)):
+        if not row:
+            continue
+        name = row[0].strip()
+        if name:
+            ids.add(name.lower())
+            if "\\" in name:
+                ids.add(name.split("\\", 1)[1].lower())
+        if len(row) > 2 and row[2].strip():
+            ids.add(row[2].strip().lower())
+    return ids or None
+
+
+def access_denied_reason(policy):
+    """Return a message explaining why access is denied, or ``None`` to allow.
+
+    The group check applies only on a Windows machine that is joined to an AD
+    domain or to Microsoft Entra; anywhere else there is no directory to check
+    against, so access is allowed.
+    """
+    if policy is None or not policy.group:
+        return None
+    if sys.platform != "win32":
+        return None
+    unverified = ("Could not verify your membership of the security group "
+                  "'{}' required to use this application. Access is denied."
+                  .format(policy.group))
+    status = windows_join_status()
+    if status is None:
+        # Couldn't tell whether the machine is joined; treat as unverifiable.
+        return unverified if policy.deny_on_error else None
+    if not any(status):
+        return None  # determined standalone: no directory to enforce against
+    groups = current_user_groups()
+    if groups is None:
+        return unverified if policy.deny_on_error else None
+    want = policy.group.lower()
+    if want in groups or ("\\" in want and want.split("\\", 1)[1] in groups):
+        return None
+    return ("Access denied: your account is not a member of the security group "
+            "'{}' required to use this application.\n\nContact your "
+            "administrator if you believe this is an error.".format(policy.group))
+
+
+# --------------------------------------------------------------------------- #
 # Data access
 # --------------------------------------------------------------------------- #
 class BudgetDB:
@@ -310,9 +441,7 @@ class BudgetDB:
         self.backend = self.config.backend
         if self.backend == "mariadb":
             self._ph = "%s"
-            self.conn = pymysql.connect(
-                cursorclass=pymysql.cursors.DictCursor,
-                charset="utf8mb4", autocommit=False, **self.config.params)
+            self.conn = self._connect_mariadb()
         else:
             self._ph = "?"
             self.conn = sqlite3.connect(self.config.params["path"])
@@ -320,6 +449,42 @@ class BudgetDB:
             self.conn.execute("PRAGMA foreign_keys = ON")
         self._create_schema()
         self._seed_categories()
+
+    # -- connection --------------------------------------------------------- #
+    def _connect_mariadb(self):
+        """Connect to MariaDB, creating the target database if it is missing.
+
+        MariaDB rejects the connection with error 1049 ("Unknown database")
+        when the configured schema does not exist yet. In that case we connect
+        to the server without selecting a database, issue ``CREATE DATABASE IF
+        NOT EXISTS``, and retry -- so a fresh server only needs a user with the
+        CREATE privilege, not a pre-created schema.
+        """
+        try:
+            return self._open_mariadb_connection()
+        except pymysql.err.OperationalError as e:
+            if e.args and e.args[0] == 1049:  # Unknown database
+                self._create_database()
+                return self._open_mariadb_connection()
+            raise
+
+    def _open_mariadb_connection(self):
+        return pymysql.connect(
+            cursorclass=pymysql.cursors.DictCursor,
+            charset="utf8mb4", autocommit=False, **self.config.params)
+
+    def _create_database(self):
+        """Create the configured MariaDB schema (used on first connect)."""
+        name = self.config.params["database"]
+        server = {k: v for k, v in self.config.params.items() if k != "database"}
+        conn = pymysql.connect(charset="utf8mb4", autocommit=True, **server)
+        try:
+            with conn.cursor() as cur:
+                # Quote the identifier, escaping any embedded backticks.
+                cur.execute("CREATE DATABASE IF NOT EXISTS `{}` "
+                            "CHARACTER SET utf8mb4".format(name.replace("`", "``")))
+        finally:
+            conn.close()
 
     # -- low-level helpers -------------------------------------------------- #
     def _query(self, sql, params=None):
@@ -1610,6 +1775,13 @@ class BudgetApp(tk.Tk):
 
 
 def main():
+    reason = access_denied_reason(load_access_config())
+    if reason:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror("Access denied", reason)
+        root.destroy()
+        sys.exit(1)
     app = BudgetApp()
     app.mainloop()
 

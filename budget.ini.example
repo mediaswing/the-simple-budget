@@ -18,3 +18,12 @@ database = budget
 # For the SQLite backend you may optionally override the database file path:
 # backend = sqlite
 # path = /path/to/budget.db
+
+# Optional access control. Only enforced on Windows machines joined to an AD
+# domain or to Microsoft Entra; ignored elsewhere (standalone PCs, macOS/Linux).
+# [access]
+# group = Budget-Users        ; required security group. Use the name (matched
+#                             ; as "Group" or "DOMAIN\Group") or the group's SID
+#                             ; (recommended for Entra cloud groups).
+# deny_on_error = true        ; on a joined PC, deny access if group membership
+#                             ; can't be checked (fail closed). Default: true.
