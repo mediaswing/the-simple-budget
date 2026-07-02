@@ -9,6 +9,16 @@ section below as the GitHub Release notes.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-02
+
+### Added
+- **Report tab** to save a spending report (summary, and spending by category,
+  year, and month, with an optional full list of budget lines) as a **PDF**
+  (`fpdf2`), a **Word document** (`python-docx`), or an **audio file**
+  (`pyttsx3`, using the voice and speed chosen on the Chart tab). Reachable via
+  `Ctrl+4` / `Alt+R` or **File → Save report…**. Each format is offered only
+  when its library is installed.
+
 ## [0.3.0] - 2026-07-02
 
 ### Added
@@ -56,7 +66,8 @@ tracker built with Python/Tkinter.
 - The macOS build targets Apple Silicon (arm64).
 - The read-aloud feature needs eSpeak on Linux (`sudo apt-get install espeak`).
 
-[Unreleased]: https://github.com/mediaswing/the-simple-budget/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/mediaswing/the-simple-budget/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/mediaswing/the-simple-budget/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/mediaswing/the-simple-budget/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/mediaswing/the-simple-budget/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/mediaswing/the-simple-budget/releases/tag/v0.1.0

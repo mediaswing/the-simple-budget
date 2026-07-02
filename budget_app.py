@@ -17,12 +17,14 @@ is a standard Python install with Tk (no third-party packages needed).
 """
 
 import os
+import sys
+import queue
 import sqlite3
 import threading
 import configparser
 import datetime as dt
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 # pyttsx3 powers the "read chart aloud" feature for visually impaired users.
 # It is optional: if it is not installed the app still runs, and the speech
@@ -40,6 +42,19 @@ try:
     import pymysql.cursors
 except ImportError:  # pragma: no cover - depends on the environment
     pymysql = None
+
+# Optional report-export backends. Each format is available only if its library
+# is installed; the Report tab disables the ones that are missing and explains
+# how to enable them.
+try:
+    from fpdf import FPDF
+except ImportError:  # pragma: no cover - depends on the environment
+    FPDF = None
+
+try:
+    import docx
+except ImportError:  # pragma: no cover - depends on the environment
+    docx = None
 
 # Duplicate-key errors differ per backend; catch both to give the same message.
 INTEGRITY_ERRORS = (sqlite3.IntegrityError,) + (
@@ -170,6 +185,33 @@ class Speaker:
                 engine.stop()
             except Exception:  # pragma: no cover
                 pass
+
+    def save_to_file(self, text, path, on_done):
+        """Render *text* to an audio file on a background thread.
+
+        *on_done* is called with None on success or the exception on failure.
+        It runs on the worker thread, so it should only hand results back to the
+        GUI thread in a thread-safe way (e.g. via a queue).
+        """
+        if not self.available:
+            return False
+
+        def run():
+            err = None
+            try:
+                engine = pyttsx3.init()
+                if self.rate is not None:
+                    engine.setProperty("rate", self.rate)
+                if self.voice_id is not None:
+                    engine.setProperty("voice", self.voice_id)
+                engine.save_to_file(text, path)
+                engine.runAndWait()
+            except Exception as e:  # pragma: no cover - driver issues
+                err = e
+            on_done(err)
+
+        threading.Thread(target=run, daemon=True).start()
+        return True
 
 
 # --------------------------------------------------------------------------- #
@@ -1114,6 +1156,280 @@ class ChartTab(ttk.Frame):
 
 
 # --------------------------------------------------------------------------- #
+# Report building & export
+# --------------------------------------------------------------------------- #
+def gather_report(db):
+    """Collect everything the report needs from the database, once."""
+    lines = db.lines()
+    return {
+        "generated": dt.datetime.now(),
+        "source": db.config.description,
+        "num_lines": len(lines),
+        "total": sum(l["price"] for l in lines),
+        "by_category": db.totals_by("category"),
+        "by_year": db.totals_by("year"),
+        "by_month": [(m, v) for m, v in db.totals_by("month") if v],
+        "lines": lines,
+    }
+
+
+def _report_sections(data):
+    """The three grouped sections shared by every export format."""
+    return [
+        ("Spending by category", data["by_category"]),
+        ("Spending by year", data["by_year"]),
+        ("Spending by month", data["by_month"]),
+    ]
+
+
+def report_speech_text(data):
+    """A spoken-language version of the report, for the audio export."""
+    if data["num_lines"] == 0:
+        return "Budget report. No spending has been recorded yet."
+    total = data["total"] or 1
+    parts = [
+        "Budget report.",
+        "Total spend {} across {} budget line{}.".format(
+            spoken_gbp(data["total"]), data["num_lines"],
+            "" if data["num_lines"] == 1 else "s"),
+    ]
+    for title, rows in _report_sections(data):
+        chunk = [title + "."]
+        for label, val in rows:
+            chunk.append("{}: {}, {} percent.".format(
+                label, spoken_gbp(val), int(round(val / total * 100))))
+        parts.append(" ".join(chunk))
+    return " ".join(parts)
+
+
+def write_pdf(data, path, include_lines=True):
+    """Write the report as a PDF using fpdf2."""
+    def t(s):  # core PDF fonts are latin-1; keep '£' but replace exotic chars
+        return str(s).encode("latin-1", "replace").decode("latin-1")
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 18)
+    pdf.cell(0, 10, t("Budget Report"), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 10)
+    pdf.set_text_color(110)
+    pdf.cell(0, 6, t("Generated {}   |   Source: {}".format(
+        data["generated"].strftime("%Y-%m-%d %H:%M"), data["source"])),
+        new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(0)
+    pdf.ln(3)
+
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.cell(0, 8, t("Summary"), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 11)
+    pdf.cell(0, 6, t("Total spend: {}".format(gbp(data["total"]))),
+             new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, t("Budget lines: {}".format(data["num_lines"])),
+             new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(2)
+
+    total = data["total"]
+    for title, rows in _report_sections(data):
+        pdf.set_font("Helvetica", "B", 13)
+        pdf.cell(0, 8, t(title), new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "", 11)
+        if not rows:
+            pdf.cell(0, 6, t("(no data)"), new_x="LMARGIN", new_y="NEXT")
+        for label, val in rows:
+            share = " ({:.0f}%)".format(val / total * 100) if total else ""
+            pdf.cell(120, 6, t(label))
+            pdf.cell(0, 6, t(gbp(val) + share), new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2)
+
+    if include_lines and data["lines"]:
+        pdf.set_font("Helvetica", "B", 13)
+        pdf.cell(0, 8, t("All budget lines"), new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "B", 10)
+        for w, h in ((26, "Date"), (66, "Store"), (54, "Category")):
+            pdf.cell(w, 6, t(h))
+        pdf.cell(0, 6, t("Price"), new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "", 10)
+        for l in data["lines"]:
+            pdf.cell(26, 6, t(l["date"]))
+            pdf.cell(66, 6, t(l["store"][:34]))
+            pdf.cell(54, 6, t(l["category_name"][:26]))
+            pdf.cell(0, 6, t(gbp(l["price"])), new_x="LMARGIN", new_y="NEXT")
+
+    pdf.output(path)
+
+
+def write_docx(data, path, include_lines=True):
+    """Write the report as a Word document using python-docx."""
+    doc = docx.Document()
+    doc.add_heading("Budget Report", 0)
+    meta = doc.add_paragraph()
+    run = meta.add_run("Generated {}   |   Source: {}".format(
+        data["generated"].strftime("%Y-%m-%d %H:%M"), data["source"]))
+    run.italic = True
+
+    doc.add_heading("Summary", level=1)
+    doc.add_paragraph("Total spend: {}".format(gbp(data["total"])))
+    doc.add_paragraph("Budget lines: {}".format(data["num_lines"]))
+
+    total = data["total"]
+    for title, rows in _report_sections(data):
+        doc.add_heading(title, level=1)
+        if not rows:
+            doc.add_paragraph("(no data)")
+            continue
+        table = doc.add_table(rows=1, cols=3)
+        table.style = "Table Grid"
+        hdr = table.rows[0].cells
+        hdr[0].text, hdr[1].text, hdr[2].text = "Item", "Amount", "Share"
+        for label, val in rows:
+            cells = table.add_row().cells
+            cells[0].text = str(label)
+            cells[1].text = gbp(val)
+            cells[2].text = "{:.0f}%".format(val / total * 100) if total else "-"
+
+    if include_lines and data["lines"]:
+        doc.add_heading("All budget lines", level=1)
+        table = doc.add_table(rows=1, cols=4)
+        table.style = "Table Grid"
+        hdr = table.rows[0].cells
+        hdr[0].text, hdr[1].text = "Date", "Store"
+        hdr[2].text, hdr[3].text = "Category", "Price"
+        for l in data["lines"]:
+            cells = table.add_row().cells
+            cells[0].text = l["date"]
+            cells[1].text = l["store"]
+            cells[2].text = l["category_name"]
+            cells[3].text = gbp(l["price"])
+
+    doc.save(path)
+
+
+# --------------------------------------------------------------------------- #
+# Report tab
+# --------------------------------------------------------------------------- #
+class ReportTab(ttk.Frame):
+    """Save a spending report as a PDF, Word document, or audio file."""
+
+    def __init__(self, master, db, speaker):
+        super().__init__(master, padding=10)
+        self.db = db
+        self.speaker = speaker
+        self._audio_result = queue.Queue()
+
+        # (key, label, available?, hint-if-missing)
+        self.formats = [
+            ("pdf", "PDF document (.pdf)", FPDF is not None,
+             "Install fpdf2:  pip install fpdf2"),
+            ("docx", "Word document (.docx)", docx is not None,
+             "Install python-docx:  pip install python-docx"),
+            ("audio", "Audio file", self.speaker.available,
+             "Install pyttsx3:  pip install pyttsx3"),
+        ]
+
+        ttk.Label(self, text="Save a spending report",
+                  font=("Helvetica", 13, "bold")).pack(anchor="w")
+
+        box = ttk.LabelFrame(self, text="Format", padding=10)
+        box.pack(fill="x", pady=(10, 0))
+        first_available = next((k for k, _, ok, _ in self.formats if ok), "pdf")
+        self.format_var = tk.StringVar(value=first_available)
+        for key, label, available, hint in self.formats:
+            text = label if available else "{}  —  {}".format(label, hint)
+            rb = ttk.Radiobutton(box, text=text, value=key,
+                                 variable=self.format_var)
+            rb.pack(anchor="w", pady=2)
+            if not available:
+                rb.state(["disabled"])
+
+        self.include_lines_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            self, text="Include the full list of budget lines "
+            "(PDF and Word only)",
+            variable=self.include_lines_var).pack(anchor="w", pady=(10, 0))
+
+        self.save_btn = ttk.Button(self, text="Save report… (Ctrl+S)",
+                                   command=self.export)
+        self.save_btn.pack(anchor="w", pady=(12, 0))
+        if not any(ok for _, _, ok, _ in self.formats):
+            self.save_btn.state(["disabled"])
+
+        self.status_var = tk.StringVar(value="")
+        ttk.Label(self, textvariable=self.status_var, wraplength=760,
+                  justify="left", foreground="#333").pack(anchor="w",
+                                                          pady=(12, 0))
+
+    # DataTab/CategoriesTab expose save()/focus_new(); mirror save() so the
+    # Ctrl+S shortcut works here too.
+    def save(self):
+        self.export()
+
+    def _default_name(self, ext):
+        return "budget-report-{}{}".format(
+            dt.date.today().strftime("%Y%m%d"), ext)
+
+    def export(self):
+        fmt = self.format_var.get()
+        if fmt == "audio":
+            ext = ".aiff" if sys.platform == "darwin" else ".wav"
+            filetypes = [("Audio file", "*" + ext), ("All files", "*.*")]
+        elif fmt == "docx":
+            ext, filetypes = ".docx", [("Word document", "*.docx")]
+        else:
+            ext, filetypes = ".pdf", [("PDF document", "*.pdf")]
+
+        path = filedialog.asksaveasfilename(
+            title="Save report", defaultextension=ext,
+            initialfile=self._default_name(ext), filetypes=filetypes)
+        if not path:
+            return
+
+        data = gather_report(self.db)
+        try:
+            if fmt == "pdf":
+                write_pdf(data, path, self.include_lines_var.get())
+            elif fmt == "docx":
+                write_docx(data, path, self.include_lines_var.get())
+            else:
+                self._export_audio(data, path)
+                return  # audio finishes asynchronously
+        except Exception as e:
+            messagebox.showerror("Export failed", str(e))
+            self.status_var.set("Export failed: {}".format(e))
+            return
+        self._finish(path)
+
+    def _export_audio(self, data, path):
+        self.save_btn.state(["disabled"])
+        self.status_var.set("Generating audio… this can take a few seconds.")
+        started = self.speaker.save_to_file(
+            report_speech_text(data), path,
+            lambda err: self._audio_result.put((path, err)))
+        if not started:
+            self.save_btn.state(["!disabled"])
+            self.status_var.set("Audio export is unavailable.")
+            return
+        self.after(150, self._poll_audio)
+
+    def _poll_audio(self):
+        try:
+            path, err = self._audio_result.get_nowait()
+        except queue.Empty:
+            self.after(150, self._poll_audio)
+            return
+        self.save_btn.state(["!disabled"])
+        if err:
+            messagebox.showerror("Export failed", str(err))
+            self.status_var.set("Audio export failed: {}".format(err))
+        else:
+            self._finish(path)
+
+    def _finish(self, path):
+        self.status_var.set("Saved report to:\n{}".format(path))
+        messagebox.showinfo("Report saved", "Saved report to:\n{}".format(path))
+
+
+# --------------------------------------------------------------------------- #
 # Application
 # --------------------------------------------------------------------------- #
 class BudgetApp(tk.Tk):
@@ -1136,12 +1452,14 @@ class BudgetApp(tk.Tk):
         self.data_tab = DataTab(self.nb, self.db, on_change=self._data_changed)
         self.categories_tab = CategoriesTab(
             self.nb, self.db, on_change=self._categories_changed)
+        self.report_tab = ReportTab(self.nb, self.db, speaker=self.speaker)
 
-        # `underline` gives each tab a mnemonic (Alt+D/C/G); enable_traversal
+        # `underline` gives each tab a mnemonic (Alt+D/C/G/R); enable_traversal
         # activates those plus Ctrl+Tab / Ctrl+Shift+Tab to cycle tabs.
         self.nb.add(self.data_tab, text="Data", underline=0)
         self.nb.add(self.chart_tab, text="Chart", underline=0)
         self.nb.add(self.categories_tab, text="Categories", underline=4)
+        self.nb.add(self.report_tab, text="Report", underline=0)
         self.nb.enable_traversal()
 
         self._build_menu()
@@ -1157,6 +1475,9 @@ class BudgetApp(tk.Tk):
         menubar = tk.Menu(self)
 
         filemenu = tk.Menu(menubar, tearoff=0)
+        filemenu.add_command(label="Save report…", accelerator="Ctrl+4",
+                             command=self._open_report)
+        filemenu.add_separator()
         filemenu.add_command(label="Quit", accelerator="Ctrl+Q",
                              command=self.destroy)
         menubar.add_cascade(label="File", menu=filemenu, underline=0)
@@ -1177,6 +1498,8 @@ class BudgetApp(tk.Tk):
                              command=lambda: self._select_tab(1))
         viewmenu.add_command(label="Categories tab", accelerator="Ctrl+3",
                              command=lambda: self._select_tab(2))
+        viewmenu.add_command(label="Report tab", accelerator="Ctrl+4",
+                             command=lambda: self._select_tab(3))
         viewmenu.add_command(label="Refresh chart", accelerator="Ctrl+R",
                              command=self.chart_tab.draw)
         menubar.add_cascade(label="View", menu=viewmenu, underline=0)
@@ -1206,6 +1529,7 @@ class BudgetApp(tk.Tk):
         self.bind_all("<Control-Key-1>", lambda _e: self._select_tab(0))
         self.bind_all("<Control-Key-2>", lambda _e: self._select_tab(1))
         self.bind_all("<Control-Key-3>", lambda _e: self._select_tab(2))
+        self.bind_all("<Control-Key-4>", lambda _e: self._select_tab(3))
         self.bind_all("<Escape>", lambda _e: self.speaker.stop())
         self.bind_all("<F1>", lambda _e: self._show_shortcuts())
 
@@ -1222,26 +1546,27 @@ class BudgetApp(tk.Tk):
 
     # -- editing shortcuts act on whichever editable tab is showing --------- #
     def _current_editor(self):
-        editors = {0: self.data_tab, 2: self.categories_tab}
+        editors = {0: self.data_tab, 2: self.categories_tab,
+                   3: self.report_tab}
         return editors.get(self.nb.index(self.nb.select()))
 
     def _editor_save(self):
         editor = self._current_editor()
-        if editor:
+        if editor is not None:  # Data.save / Categories.save / Report.export
             editor.save()
         return "break"
 
     def _editor_new(self):
         editor = self._current_editor()
-        if editor is None:  # e.g. on the Chart tab -> default to Data
-            self._select_tab(0)
+        if editor is None or not hasattr(editor, "focus_new"):
+            self._select_tab(0)  # e.g. Chart/Report -> start a new Data line
             editor = self.data_tab
         editor.focus_new()
         return "break"
 
     def _editor_delete(self):
         editor = self._current_editor()
-        if editor:
+        if editor is not None and hasattr(editor, "delete"):
             editor.delete()
 
     def _select_tab(self, index):
@@ -1255,6 +1580,11 @@ class BudgetApp(tk.Tk):
         self.chart_tab.speak_chart()
         return "break"
 
+    def _open_report(self):
+        self._select_tab(3)
+        self.report_tab.save_btn.focus_set()
+        return "break"
+
     def _show_shortcuts(self):
         messagebox.showinfo(
             "Keyboard shortcuts",
@@ -1262,6 +1592,7 @@ class BudgetApp(tk.Tk):
             "  Ctrl+1 / Alt+D   Data tab\n"
             "  Ctrl+2 / Alt+C   Chart tab\n"
             "  Ctrl+3 / Alt+G   Categories tab\n"
+            "  Ctrl+4 / Alt+R   Report tab\n"
             "  Ctrl+Tab         Next tab\n"
             "  Tab / Shift+Tab  Move between controls\n\n"
             "Editing (Data & Categories tabs)\n"
@@ -1269,6 +1600,8 @@ class BudgetApp(tk.Tk):
             "  Ctrl+S / Enter   Add or update the entry\n"
             "  Del              Delete the selected entry\n"
             "  Esc              Clear the form\n\n"
+            "Report tab\n"
+            "  Ctrl+S           Save the report\n\n"
             "Accessibility (Chart tab)\n"
             "  Ctrl+T           Read the chart aloud\n"
             "  Esc              Stop reading\n"

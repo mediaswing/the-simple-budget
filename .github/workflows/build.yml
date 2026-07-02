@@ -37,7 +37,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller pyttsx3 pymysql
+          pip install pyinstaller pyttsx3 pymysql fpdf2 python-docx
 
       - name: Build
         run: pyinstaller --noconfirm --clean TheSimpleBudget.spec

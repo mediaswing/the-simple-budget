@@ -21,6 +21,8 @@ standard Python install with Tk.
 - **Read chart aloud** — the chart can be spoken as plain-language text via
   [`pyttsx3`](https://pypi.org/project/pyttsx3/) for visually impaired users,
   with a live on-screen transcript, a **voice picker**, and a **speed slider**.
+- **Report tab** — save a spending report as a **PDF**, **Word document
+  (.docx)**, or **audio file**.
 - **Local or central database** — use the built-in SQLite database, or point the
   app at a shared MariaDB server via a config file.
 
@@ -28,15 +30,31 @@ standard Python install with Tk.
 
 - Python 3 with Tk (bundled with most Python installs; `python3 -m tkinter`
   should open a test window).
-- Optional: `pyttsx3` for the read-aloud feature.
+- Optional: `pyttsx3` for the read-aloud and audio-export features.
 - Optional: `pymysql` for the MariaDB backend.
+- Optional: `fpdf2` (PDF export) and `python-docx` (Word export).
 
 ```sh
-pip install pyttsx3 pymysql
+pip install pyttsx3 pymysql fpdf2 python-docx
 ```
 
-If `pyttsx3` is not installed the app still runs normally — the speech controls
-are disabled and the transcript explains how to enable them.
+Every optional feature degrades gracefully: if a package is missing, the related
+control is disabled and explains how to enable it, and the rest of the app runs
+normally.
+
+## Reports
+
+The **Report** tab saves a spending report — summary totals plus spending by
+category, year, and month (and, optionally, the full list of budget lines) — in
+your choice of format:
+
+- **PDF** (requires `fpdf2`)
+- **Word document, .docx** (requires `python-docx`)
+- **Audio file** (requires `pyttsx3`; uses the same voice and speed chosen on
+  the Chart tab)
+
+Reach it with `Ctrl+4` / `Alt+R`, or **File → Save report…**, then press
+`Ctrl+S` to choose a filename.
 
 ## Database (local SQLite or central MariaDB)
 
