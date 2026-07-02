@@ -76,11 +76,37 @@ database = budget
 - The active database is shown in the window's title bar.
 - If `backend` is omitted, MariaDB is used automatically when `host`, `user`,
   and `database` are all provided; otherwise SQLite is used.
+- The schema is created for you on first run: the named `database` is created if
+  it doesn't exist (the user needs the `CREATE` privilege), and the tables are
+  created inside it. Point the app at an empty server and it bootstraps itself.
 - MariaDB requires `pip install pymysql`. If the package is missing or the
   server can't be reached, the app warns and falls back to the local database so
   it always starts.
 - `budget.ini` holds credentials and is git-ignored — commit only the
   `.example`.
+
+## Restricting access (Windows AD / Microsoft Entra)
+
+On a Windows machine joined to an **Active Directory domain** or to **Microsoft
+Entra**, an administrator can limit who may run the app to members of a security
+group. Add an `[access]` section to `budget.ini`:
+
+```ini
+[access]
+group = Budget-Users
+```
+
+- `group` may be a group **name** (matched as `Group` or `DOMAIN\Group`) or the
+  group's **SID**. Use the SID for Entra cloud groups, whose names don't always
+  resolve on the client.
+- Membership is read from the user's Windows token (`whoami /groups`) at startup.
+  A user who isn't in the group sees an "Access denied" message and the app quits.
+- The check applies **only** on a domain- or Entra-joined Windows PC. On a
+  standalone Windows machine, macOS, or Linux there's no directory to check
+  against, so the app runs normally.
+- `deny_on_error = true` (the default) fails closed: if group membership — or
+  even whether the machine is joined — can't be determined (e.g. the check is
+  blocked or times out), access is denied. Set it to `false` to fail open.
 
 ## Running
 
