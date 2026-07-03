@@ -9,6 +9,16 @@ section below as the GitHub Release notes.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-03
+
+### Fixed
+- macOS and Linux downloads failed to launch ("permission denied" / a generic
+  error) because the release pipeline stripped the executable bit: GitHub's
+  `upload-artifact` doesn't preserve Unix permissions. Each platform's build is
+  now zipped on its own build machine (via `ditto` on macOS, `zip` on Linux) so
+  permissions — and the macOS ad-hoc signature — survive download. No more
+  `chmod +x` needed after unzipping.
+
 ## [0.5.0] - 2026-07-02
 
 ### Added

@@ -42,11 +42,30 @@ jobs:
       - name: Build
         run: pyinstaller --noconfirm --clean TheSimpleBudget.spec
 
+      # Zip the build here, on the build machine, so the executable bit
+      # survives. upload-artifact does NOT preserve Unix permissions, so
+      # uploading the unzipped tree leaves the macOS/Linux launcher
+      # non-executable ("permission denied") for whoever downloads it. A
+      # pre-made zip is stored byte-for-byte, keeping perms (and, on macOS, the
+      # ad-hoc signature via ditto) intact.
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent dist/TheSimpleBudget.app "${{ matrix.artifact }}.zip"
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: cd dist && zip -r "../${{ matrix.artifact }}.zip" TheSimpleBudget
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist\TheSimpleBudget -DestinationPath "${{ matrix.artifact }}.zip"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
-          path: dist/*
+          path: ${{ matrix.artifact }}.zip
 
   release:
     # Attach the built binaries to a GitHub Release when a tag is pushed.
@@ -60,12 +79,10 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
-      - name: Zip each platform's build
-        run: |
-          cd artifacts
-          for d in */; do zip -r "../${d%/}.zip" "$d"; done
-          cd ..
-          ls -la *.zip
+      # Each build job already uploaded a ready-to-ship zip (with permissions
+      # preserved), so just list them; no re-zipping that would strip perms.
+      - name: List release assets
+        run: find artifacts -name '*.zip' -print
       - name: Extract release notes from CHANGELOG
         run: |
           # Pull the section for this tag's version (v1.2.3 -> [1.2.3]) out of
@@ -85,4 +102,4 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           body_path: RELEASE_NOTES.md
-          files: "*.zip"
+          files: "artifacts/**/*.zip"
