@@ -164,3 +164,11 @@ showing.
 
 Press `F1` at any time for the in-app shortcut reference. The voice and speaking
 speed used for read-aloud can be changed from the controls on the Chart tab.
+
+## Contributing
+
+Feature requests may be declined even if accompanied by an implementation.
+Pull requests are reviewed at the maintainer's discretion. AI-generated
+contributions must be understood and tested by the contributor. User-provided
+scripts, extensions and advanced functions are unsupported and used at the
+user's own risk.
