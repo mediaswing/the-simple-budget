@@ -86,7 +86,8 @@ SEED_CATEGORIES = [
 
 def gbp(value):
     """Format a number as pounds sterling, e.g. 1234.5 -> '£1,234.50'."""
-    return "£{:,.2f}".format(value)
+    sign = "-" if value < 0 else ""
+    return "{}£{:,.2f}".format(sign, abs(value))
 
 
 def spoken_gbp(value):
@@ -94,12 +95,14 @@ def spoken_gbp(value):
 
     e.g. 1234.5 -> '1234 pounds and 50 pence'.
     """
+    sign = "minus " if value < 0 else ""
+    value = abs(value)
     pounds = int(value)
     pence = int(round((value - pounds) * 100))
     if pence == 100:  # rounding pushed us to the next pound
         pounds += 1
         pence = 0
-    text = "{} pound{}".format(pounds, "" if pounds == 1 else "s")
+    text = "{}{} pound{}".format(sign, pounds, "" if pounds == 1 else "s")
     if pence:
         text += " and {} pence".format(pence)
     return text
@@ -285,7 +288,15 @@ def open_db(ini_path=INI_PATH):
     sqlite_cfg = DBConfig("sqlite", {"path": DB_PATH}, "internal database (SQLite)")
 
     if cfg.backend != "mariadb":
-        return BudgetDB(cfg), None
+        if cfg.params.get("path") == DB_PATH:
+            return BudgetDB(cfg), None
+        try:
+            return BudgetDB(cfg), None
+        except Exception as e:  # bad/unwritable configured path
+            return (BudgetDB(sqlite_cfg),
+                    "Could not open the configured database file ({}): {}\n\n"
+                    "Using the internal database instead.".format(
+                        cfg.params.get("path"), e))
 
     if pymysql is None:
         return (BudgetDB(sqlite_cfg),

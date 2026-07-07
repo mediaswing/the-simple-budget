@@ -9,6 +9,17 @@ section below as the GitHub Release notes.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-07-07
+
+### Fixed
+- `open_db` no longer crashes on startup when `budget.ini` configures a
+  SQLite `path` that can't be opened (missing directory, permissions,
+  etc.) — it now falls back to the internal database with a warning,
+  matching the existing MariaDB fallback behaviour.
+- `gbp()` and `spoken_gbp()` formatted negative amounts incorrectly
+  (`£-5.00`, "-1 pounds and -50 pence"); they now render as `-£5.00` and
+  "minus 1 pound and 50 pence".
+
 ## [0.5.1] - 2026-07-03
 
 ### Fixed
@@ -92,7 +103,8 @@ tracker built with Python/Tkinter.
 - The macOS build targets Apple Silicon (arm64).
 - The read-aloud feature needs eSpeak on Linux (`sudo apt-get install espeak`).
 
-[Unreleased]: https://github.com/mediaswing/the-simple-budget/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/mediaswing/the-simple-budget/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/mediaswing/the-simple-budget/compare/v0.5.1...v0.5.2
 [0.4.0]: https://github.com/mediaswing/the-simple-budget/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/mediaswing/the-simple-budget/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/mediaswing/the-simple-budget/compare/v0.1.0...v0.2.0
