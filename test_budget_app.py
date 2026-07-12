@@ -6,6 +6,8 @@ the OS calls (``subprocess``) and the ``pymysql`` driver are stubbed.
 Run with:  python3 -m unittest -v test_budget_app
 """
 import io
+import os
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -174,6 +176,43 @@ class CreateDatabaseTests(unittest.TestCase):
         with mock.patch.object(ba.pymysql, "connect", connect):
             with self.assertRaises(ba.pymysql.err.OperationalError):
                 db._connect_mariadb()
+
+
+class OpenDbFallbackTests(unittest.TestCase):
+    """open_db()'s docstring promises falling back to SQLite (with a
+    warning) 'on any problem' -- including a malformed budget.ini, which
+    used to crash app startup instead."""
+
+    def test_malformed_ini_falls_back_to_sqlite_with_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ini_path = os.path.join(tmp, "budget.ini")
+            with open(ini_path, "w") as f:
+                f.write("[database]\nport = not-a-number\n")
+            with mock.patch.object(ba, "DB_PATH", os.path.join(tmp, "budget.db")):
+                db, warning = ba.open_db(ini_path)
+            self.addCleanup(db.conn.close)
+            self.assertIsNotNone(warning)
+            self.assertIn("budget.ini", warning)
+            self.assertEqual(db.config.backend, "sqlite")
+
+    def test_mariadb_requested_without_credentials_falls_back_to_sqlite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ini_path = os.path.join(tmp, "budget.ini")
+            with open(ini_path, "w") as f:
+                f.write("[database]\nbackend = mariadb\n")
+            with mock.patch.object(ba, "DB_PATH", os.path.join(tmp, "budget.db")):
+                db, warning = ba.open_db(ini_path)
+            self.addCleanup(db.conn.close)
+            self.assertIsNotNone(warning)
+            self.assertEqual(db.config.backend, "sqlite")
+
+    def test_no_ini_uses_sqlite_with_no_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(ba, "DB_PATH", os.path.join(tmp, "budget.db")):
+                db, warning = ba.open_db(os.path.join(tmp, "no-such.ini"))
+            self.addCleanup(db.conn.close)
+            self.assertIsNone(warning)
+            self.assertEqual(db.config.backend, "sqlite")
 
 
 if __name__ == "__main__":

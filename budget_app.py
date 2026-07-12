@@ -32,7 +32,7 @@ from tkinter import ttk, messagebox, filedialog
 
 import updater
 
-__version__ = "0.6.1"
+__version__ = "0.6.2"
 
 # pyttsx3 powers the "read chart aloud" feature for visually impaired users.
 # It is optional: if it is not installed the app still runs, and the speech
@@ -133,8 +133,16 @@ class Speaker:
         self.rate = None
         self.voice_id = None
         self._voices_cache = None
+        self._voices_lock = threading.Lock()
         self._default_rate = 200
         self._default_voice = None
+        # pyttsx3.init() (in voices(), below) can take a noticeable fraction
+        # of a second -- start probing it now, on a background thread, so it
+        # has a head start on the rest of BudgetApp's construction instead of
+        # blocking first paint when the Chart tab asks for the voice list a
+        # moment later. Safe on a non-main thread: speak() (below) already
+        # runs its own pyttsx3.init() off the main thread.
+        threading.Thread(target=self.voices, daemon=True).start()
 
     @property
     def available(self):
@@ -146,20 +154,27 @@ class Speaker:
         return self._default_rate
 
     def voices(self):
-        """Return [(voice_id, name), ...] for the installed voices (cached)."""
+        """Return [(voice_id, name), ...] for the installed voices (cached).
+
+        Thread-safe: the initial probe may be kicked off from __init__'s
+        background thread and/or called again from the main thread before
+        that finishes, so only one of them should actually call pyttsx3.init().
+        """
         if not self.available:
             return []
         if self._voices_cache is None:
-            self._voices_cache = []
-            try:
-                engine = pyttsx3.init()
-                self._voices_cache = [
-                    (v.id, v.name) for v in engine.getProperty("voices")]
-                self._default_rate = engine.getProperty("rate") or 200
-                self._default_voice = engine.getProperty("voice")
-                engine.stop()
-            except Exception:  # pragma: no cover - driver issues
-                pass
+            with self._voices_lock:
+                if self._voices_cache is None:  # re-check: lost the race?
+                    self._voices_cache = []
+                    try:
+                        engine = pyttsx3.init()
+                        self._voices_cache = [
+                            (v.id, v.name) for v in engine.getProperty("voices")]
+                        self._default_rate = engine.getProperty("rate") or 200
+                        self._default_voice = engine.getProperty("voice")
+                        engine.stop()
+                    except Exception:  # pragma: no cover - driver issues
+                        pass
         return self._voices_cache
 
     def speak(self, text):
@@ -289,12 +304,16 @@ def open_db(ini_path=INI_PATH):
     Returns ``(db, warning)`` where *warning* is None, or a message describing
     why the app fell back to the internal database (shown to the user).
     """
-    cfg = load_db_config(ini_path)
     sqlite_cfg = DBConfig("sqlite", {"path": DB_PATH}, "internal database (SQLite)")
 
+    try:
+        cfg = load_db_config(ini_path)
+    except Exception as e:  # malformed budget.ini (bad port, missing fields, ...)
+        return (BudgetDB(sqlite_cfg),
+                "Could not read budget.ini: {}\n\n"
+                "Using the internal database instead.".format(e))
+
     if cfg.backend != "mariadb":
-        if cfg.params.get("path") == DB_PATH:
-            return BudgetDB(cfg), None
         try:
             return BudgetDB(cfg), None
         except Exception as e:  # bad/unwritable configured path
@@ -355,6 +374,20 @@ def load_access_config(ini_path=INI_PATH):
     return AccessPolicy(group, sec.getboolean("deny_on_error", True))
 
 
+def _run_windows_tool(args, timeout=10):
+    """Run a Windows diagnostic command, returning its CompletedProcess if it
+    ran, exited zero, and produced output -- or None otherwise (missing
+    binary, timeout, non-zero exit, or empty stdout)."""
+    try:
+        out = subprocess.run(args, capture_output=True, text=True,
+                             timeout=timeout, **_NO_WINDOW)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0 or not out.stdout:
+        return None
+    return out
+
+
 def windows_join_status():
     """Return ``(domain_joined, entra_joined)`` for this Windows machine, or
     ``None`` if the join state could not be determined.
@@ -364,12 +397,8 @@ def windows_join_status():
     the check itself failed (dsregcmd missing/blocked/timed out) so the caller
     can decide whether to fail open or closed.
     """
-    try:
-        out = subprocess.run(["dsregcmd", "/status"], capture_output=True,
-                             text=True, timeout=10, **_NO_WINDOW)
-    except (OSError, subprocess.SubprocessError):
-        out = None
-    if out is not None and out.returncode == 0 and out.stdout:
+    out = _run_windows_tool(["dsregcmd", "/status"])
+    if out is not None:
         domain = entra = False
         for line in out.stdout.splitlines():
             low = line.lower().replace(" ", "")
@@ -392,13 +421,8 @@ def current_user_groups():
     also stored bare (``group``). SIDs are included so an Entra cloud group can
     be matched by its object SID when its name doesn't resolve locally.
     """
-    try:
-        out = subprocess.run(["whoami", "/groups", "/fo", "csv", "/nh"],
-                             capture_output=True, text=True, timeout=10,
-                             **_NO_WINDOW)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if out.returncode != 0 or not out.stdout:
+    out = _run_windows_tool(["whoami", "/groups", "/fo", "csv", "/nh"])
+    if out is None:
         return None
     ids = set()
     for row in csv.reader(io.StringIO(out.stdout)):
@@ -1001,7 +1025,7 @@ class DataTab(ttk.Frame):
 
     def _read_form(self):
         store = self.store_var.get().strip()
-        price_s = self.price_var.get().strip().lstrip("£").replace(",", "")
+        price_s = self.price_var.get().strip().replace("£", "").replace(",", "")
         date_s = self.date_var.get().strip()
         cat_name = self.category_var.get()
 
@@ -1078,7 +1102,11 @@ class DataTab(ttk.Frame):
         self.date_var.set(vals[1])
         self.store_var.set(vals[2])
         self.category_var.set(vals[3])
-        self.price_var.set(vals[4].lstrip("£").replace(",", ""))
+        # .replace, not .lstrip: gbp() puts the minus sign *before* the £ on
+        # negative amounts ("-£12.34"), so lstrip("£") -- which only strips
+        # from the very start -- would leave the £ in place and break the
+        # float() parse in _read_form when re-editing such a line.
+        self.price_var.set(vals[4].replace("£", "").replace(",", ""))
         self.update_btn.config(state="normal")
         self.delete_btn.config(state="normal")
 

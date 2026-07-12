@@ -9,6 +9,20 @@ section below as the GitHub Release notes.
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-07-12
+
+### Fixed
+- Re-selecting a budget line with a negative price (possible via a shared
+  MariaDB backend or direct DB edits, though the UI itself never lets you
+  enter one) failed to parse back into the edit form, blocking further edits
+  to that line via the app.
+- `open_db` crashed the app on startup if `budget.ini` was malformed (e.g. a
+  non-numeric `port`) instead of falling back to the internal database with
+  a warning, as its own docstring already promised for other failure modes.
+- The read-aloud voice list now starts probing in the background as soon as
+  the app launches, instead of blocking the window's first paint while
+  `pyttsx3` initializes.
+
 ## [0.6.1] - 2026-07-12
 
 ### Fixed
