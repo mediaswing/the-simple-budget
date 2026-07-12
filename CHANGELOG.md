@@ -9,6 +9,15 @@ section below as the GitHub Release notes.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-12
+
+### Added
+- **Auto-update**: the app now checks GitHub Releases for a newer version a
+  couple of seconds after startup, and offers a **Check for Updates…** item
+  in the Help menu. When a newer build is available, confirming downloads
+  and installs it in place before relaunching (built/frozen copies only;
+  running from source instead opens the release page in your browser).
+
 ## [0.5.2] - 2026-07-07
 
 ### Fixed

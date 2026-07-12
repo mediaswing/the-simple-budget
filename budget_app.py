@@ -27,7 +27,12 @@ import subprocess
 import configparser
 import datetime as dt
 import tkinter as tk
+import webbrowser
 from tkinter import ttk, messagebox, filedialog
+
+import updater
+
+__version__ = "0.6.0"
 
 # pyttsx3 powers the "read chart aloud" feature for visually impaired users.
 # It is optional: if it is not installed the app still runs, and the speech
@@ -1646,6 +1651,11 @@ class BudgetApp(tk.Tk):
             self.after(200, lambda: messagebox.showwarning(
                 "Database", db_warning))
 
+        # Silent background check a couple seconds after startup; failures
+        # and "already up to date" are not shown unless the user asked via
+        # the Help menu (see _check_for_updates).
+        self.after(2000, lambda: self._check_for_updates(interactive=False))
+
     # -- menu & shortcuts --------------------------------------------------- #
     def _build_menu(self):
         menubar = tk.Menu(self)
@@ -1691,6 +1701,8 @@ class BudgetApp(tk.Tk):
         helpmenu = tk.Menu(menubar, tearoff=0)
         helpmenu.add_command(label="Keyboard shortcuts", accelerator="F1",
                              command=self._show_shortcuts)
+        helpmenu.add_command(label="Check for Updates…",
+                             command=lambda: self._check_for_updates(interactive=True))
         menubar.add_cascade(label="Help", menu=helpmenu, underline=0)
 
         self.config(menu=menubar)
@@ -1783,6 +1795,80 @@ class BudgetApp(tk.Tk):
             "  Esc              Stop reading\n"
             "  Ctrl+R           Refresh the chart\n\n"
             "  F1               Show this help")
+
+    # -- auto-update ---------------------------------------------------------- #
+    def _check_for_updates(self, interactive: bool):
+        threading.Thread(target=self._update_check_worker, args=(interactive,),
+                          daemon=True).start()
+
+    def _update_check_worker(self, interactive: bool):
+        release = updater.check_latest_release(__version__)
+        self.after(0, lambda: self._on_update_check_result(release, interactive))
+
+    def _on_update_check_result(self, release, interactive: bool):
+        if release is None:
+            if interactive:
+                messagebox.showinfo(
+                    "Check for Updates",
+                    f"You're up to date (version {__version__}).")
+            return
+
+        notes = release.notes or "No release notes provided."
+        wants_update = messagebox.askyesno(
+            "Update available",
+            f"Version {release.version} is available (you have {__version__}).\n\n"
+            f"{notes}\n\nUpdate now?")
+        if not wants_update:
+            return
+
+        if not updater.is_frozen():
+            messagebox.showinfo(
+                "Update available",
+                "Running from source, so this build can't update itself.\n\n"
+                "Opening the release page in your browser…")
+            webbrowser.open(updater.RELEASES_PAGE_URL)
+            return
+
+        if not release.asset_url:
+            messagebox.showerror(
+                "Update available",
+                "No download is available for this platform yet.\n\n"
+                "Opening the release page in your browser…")
+            webbrowser.open(updater.RELEASES_PAGE_URL)
+            return
+
+        self._start_self_update(release)
+
+    def _start_self_update(self, release):
+        progress = tk.Toplevel(self)
+        progress.title("Updating…")
+        progress.resizable(False, False)
+        tk.Label(progress, text=f"Downloading version {release.version}…",
+                 padx=20, pady=12).pack()
+        bar = ttk.Progressbar(progress, mode="indeterminate", length=240)
+        bar.pack(padx=20, pady=(0, 16))
+        bar.start(12)
+        progress.transient(self)
+        progress.grab_set()
+
+        def worker():
+            try:
+                updater.perform_self_update(release)
+                # perform_self_update calls os._exit(0) on success -- it
+                # never returns here when it works.
+            except Exception as exc:  # noqa: BLE001 - surface any failure
+                self.after(0, lambda: self._on_self_update_failed(progress, exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_self_update_failed(self, progress, exc):
+        progress.destroy()
+        messagebox.showerror(
+            "Update failed",
+            f"Couldn't install the update: {exc}\n\n"
+            "Opening the release page in your browser so you can download it "
+            "manually…")
+        webbrowser.open(updater.RELEASES_PAGE_URL)
 
 
 def main():
