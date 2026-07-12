@@ -6,6 +6,7 @@ Run with:  python3 -m unittest -v test_updater
 """
 import io
 import json
+import os
 import unittest
 from unittest import mock
 
@@ -32,6 +33,19 @@ class ParseVersionTests(unittest.TestCase):
     def test_compares_as_expected(self):
         self.assertLess(updater.parse_version("0.5.2"), updater.parse_version("0.5.3"))
         self.assertLess(updater.parse_version("0.5.2"), updater.parse_version("0.10.0"))
+
+    def test_prerelease_suffix_is_dropped_not_merged(self):
+        self.assertEqual(updater.parse_version("v1.2.3-rc1"), (1, 2, 3))
+
+
+class CompareVersionsTests(unittest.TestCase):
+    def test_pads_shorter_tuple_before_comparing(self):
+        self.assertEqual(updater._compare_versions((1, 3), (1, 3, 0)), 0)
+        self.assertEqual(updater._compare_versions((1, 3, 0), (1, 3)), 0)
+
+    def test_still_orders_correctly(self):
+        self.assertEqual(updater._compare_versions((1, 3, 1), (1, 3)), 1)
+        self.assertEqual(updater._compare_versions((1, 2), (1, 3)), -1)
 
 
 class CheckLatestReleaseTests(unittest.TestCase):
@@ -89,6 +103,31 @@ class CheckLatestReleaseTests(unittest.TestCase):
         with mock.patch("urllib.request.urlopen",
                          side_effect=urllib.error.URLError("offline")):
             self.assertIsNone(updater.check_latest_release("0.5.2"))
+
+
+class SafeExtractTests(unittest.TestCase):
+    def test_extracts_normal_archive(self):
+        import tempfile
+        import zipfile
+        with tempfile.TemporaryDirectory() as tmp:
+            zip_path = os.path.join(tmp, "update.zip")
+            with zipfile.ZipFile(zip_path, "w") as zf:
+                zf.writestr("TheSimpleBudget/file.txt", "hello")
+            dest = os.path.join(tmp, "out")
+            updater._safe_extract(zip_path, dest)
+            with open(os.path.join(dest, "TheSimpleBudget", "file.txt")) as f:
+                self.assertEqual(f.read(), "hello")
+
+    def test_rejects_path_traversal_entry(self):
+        import tempfile
+        import zipfile
+        with tempfile.TemporaryDirectory() as tmp:
+            zip_path = os.path.join(tmp, "evil.zip")
+            with zipfile.ZipFile(zip_path, "w") as zf:
+                zf.writestr("../../evil.txt", "pwned")
+            dest = os.path.join(tmp, "out")
+            with self.assertRaises(OSError):
+                updater._safe_extract(zip_path, dest)
 
 
 if __name__ == "__main__":

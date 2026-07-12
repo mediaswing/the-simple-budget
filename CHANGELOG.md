@@ -9,6 +9,27 @@ section below as the GitHub Release notes.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-12
+
+### Fixed
+- **Windows self-update silently failed to install**: the updater's log file
+  lived inside the install folder it was about to rename aside, so the move
+  that placed the new build was skipped entirely once that folder no longer
+  existed under its old name — leaving the old build renamed to `.bak` and
+  nothing in its place. The log now lives outside the install folder, and
+  the update script checks each step and aborts cleanly (leaving the `.bak`
+  intact) instead of silently continuing.
+- The update-check and self-update worker threads called Tk's `after()`
+  directly instead of only ever calling it from the main thread, risking a
+  crash if the window closed mid-check; results now flow through a queue
+  polled from the main thread, matching the app's existing pattern.
+- `parse_version` mis-parsed pre-release tags like `1.2.3-rc1` as `1.2.31`
+  instead of `1.2.3`.
+- The update-download step now rejects zip entries that would extract
+  outside the target folder, and the macOS `.app` bundle path is resolved
+  by walking up to the nearest `.app` ancestor instead of a fragile string
+  split (which could pick the wrong directory on an unusual install path).
+
 ## [0.6.0] - 2026-07-12
 
 ### Added

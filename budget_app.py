@@ -32,7 +32,7 @@ from tkinter import ttk, messagebox, filedialog
 
 import updater
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 # pyttsx3 powers the "read chart aloud" feature for visually impaired users.
 # It is optional: if it is not installed the app still runs, and the speech
@@ -1797,16 +1797,38 @@ class BudgetApp(tk.Tk):
             "  F1               Show this help")
 
     # -- auto-update ---------------------------------------------------------- #
+    # Worker threads only ever put results on a queue; every self.after() call
+    # happens on the main thread (either the initiating call below, or a
+    # poller that reschedules itself), matching the _audio_result/_poll_audio
+    # pattern in ReportTab -- Tk widget methods are not documented as
+    # thread-safe, so background threads must never call them directly.
     def _check_for_updates(self, interactive: bool):
-        threading.Thread(target=self._update_check_worker, args=(interactive,),
-                          daemon=True).start()
+        if getattr(self, "_update_busy", False):
+            if interactive:
+                messagebox.showinfo("Check for Updates",
+                                     "An update check is already in progress.")
+            return
+        self._update_busy = True
+        result_queue: queue.Queue = queue.Queue()
+        threading.Thread(target=self._update_check_worker,
+                          args=(interactive, result_queue), daemon=True).start()
+        self.after(200, lambda: self._poll_update_check(result_queue))
 
-    def _update_check_worker(self, interactive: bool):
+    def _update_check_worker(self, interactive: bool, result_queue: queue.Queue):
         release = updater.check_latest_release(__version__)
-        self.after(0, lambda: self._on_update_check_result(release, interactive))
+        result_queue.put((release, interactive))
+
+    def _poll_update_check(self, result_queue: queue.Queue):
+        try:
+            release, interactive = result_queue.get_nowait()
+        except queue.Empty:
+            self.after(200, lambda: self._poll_update_check(result_queue))
+            return
+        self._on_update_check_result(release, interactive)
 
     def _on_update_check_result(self, release, interactive: bool):
         if release is None:
+            self._update_busy = False
             if interactive:
                 messagebox.showinfo(
                     "Check for Updates",
@@ -1819,9 +1841,11 @@ class BudgetApp(tk.Tk):
             f"Version {release.version} is available (you have {__version__}).\n\n"
             f"{notes}\n\nUpdate now?")
         if not wants_update:
+            self._update_busy = False
             return
 
         if not updater.is_frozen():
+            self._update_busy = False
             messagebox.showinfo(
                 "Update available",
                 "Running from source, so this build can't update itself.\n\n"
@@ -1830,6 +1854,7 @@ class BudgetApp(tk.Tk):
             return
 
         if not release.asset_url:
+            self._update_busy = False
             messagebox.showerror(
                 "Update available",
                 "No download is available for this platform yet.\n\n"
@@ -1850,6 +1875,12 @@ class BudgetApp(tk.Tk):
         bar.start(12)
         progress.transient(self)
         progress.grab_set()
+        # There is no safe way to cancel mid-self-replace, so refuse the
+        # window manager's close/Esc affordances rather than let the user
+        # think they stopped something that's still running in the background.
+        progress.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        error_queue: queue.Queue = queue.Queue()
 
         def worker():
             try:
@@ -1857,11 +1888,18 @@ class BudgetApp(tk.Tk):
                 # perform_self_update calls os._exit(0) on success -- it
                 # never returns here when it works.
             except Exception as exc:  # noqa: BLE001 - surface any failure
-                self.after(0, lambda: self._on_self_update_failed(progress, exc))
+                error_queue.put(exc)
 
         threading.Thread(target=worker, daemon=True).start()
+        self.after(200, lambda: self._poll_self_update(progress, error_queue))
 
-    def _on_self_update_failed(self, progress, exc):
+    def _poll_self_update(self, progress, error_queue: queue.Queue):
+        try:
+            exc = error_queue.get_nowait()
+        except queue.Empty:
+            self.after(200, lambda: self._poll_self_update(progress, error_queue))
+            return
+        self._update_busy = False
         progress.destroy()
         messagebox.showerror(
             "Update failed",

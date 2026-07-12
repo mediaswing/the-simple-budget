@@ -45,9 +45,23 @@ def parse_version(text: str) -> tuple:
     """"v1.2.3" -> (1, 2, 3). Non-numeric trailing bits (rc1, etc) are dropped."""
     parts = []
     for chunk in text.strip().lstrip("vV").split("."):
-        digits = "".join(ch for ch in chunk if ch.isdigit())
+        digits = ""
+        for ch in chunk:
+            if not ch.isdigit():
+                break
+            digits += ch
         parts.append(int(digits) if digits else 0)
     return tuple(parts) or (0,)
+
+
+def _compare_versions(a: tuple, b: tuple) -> int:
+    """-1/0/1, like the old cmp(). Pads the shorter tuple with zeros first so
+    "1.3" and "1.3.0" compare equal instead of the shorter one always
+    losing."""
+    length = max(len(a), len(b))
+    a = a + (0,) * (length - len(a))
+    b = b + (0,) * (length - len(b))
+    return (a > b) - (a < b)
 
 
 def is_frozen() -> bool:
@@ -72,7 +86,7 @@ def check_latest_release(current_version: str, timeout: int = 5) -> ReleaseInfo 
     if not tag:
         return None
     remote_version = parse_version(tag)
-    if remote_version <= parse_version(current_version):
+    if _compare_versions(remote_version, parse_version(current_version)) <= 0:
         return None
 
     asset_name = _ASSET_BY_PLATFORM.get(sys.platform)
@@ -91,7 +105,11 @@ def check_latest_release(current_version: str, timeout: int = 5) -> ReleaseInfo 
 
 
 def _log_path() -> str:
-    return os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "updater.log")
+    # Deliberately NOT next to the executable: on Windows/Linux that's the
+    # install directory itself, which the update script renames out from
+    # under this path partway through -- writing the log there breaks the
+    # log redirection for every command that runs after the rename.
+    return os.path.join(tempfile.gettempdir(), f"{APP_NAME}-updater.log")
 
 
 def _log(log_path: str, message: str) -> None:
@@ -107,13 +125,38 @@ def _download(url: str, dest: str, timeout: int = 60) -> None:
         raise OSError(f"Downloaded file is empty: {url}")
 
 
+def _safe_extract(zip_path: str, dest_dir: str) -> None:
+    """extractall(), but refusing any member whose path would land outside
+    dest_dir (a maliciously or corruptly crafted zip could otherwise write
+    anywhere on disk via "../" entries -- "zip slip")."""
+    dest_abs = os.path.abspath(dest_dir)
+    with zipfile.ZipFile(zip_path) as zf:
+        for member in zf.namelist():
+            target = os.path.abspath(os.path.join(dest_abs, member))
+            if target != dest_abs and not target.startswith(dest_abs + os.sep):
+                raise OSError(f"Update archive has an unsafe entry: {member!r}")
+        zf.extractall(dest_abs)
+
+
 def _install_root() -> str:
     """Path to the directory that must be replaced: the .app bundle on
     macOS, or the onedir folder containing the exe on Windows/Linux."""
     exe = os.path.abspath(sys.executable)
     if sys.platform == "darwin":
-        # exe is .../TheSimpleBudget.app/Contents/MacOS/TheSimpleBudget
-        return exe.split(".app" + os.sep, 1)[0] + ".app"
+        # exe is .../TheSimpleBudget.app/Contents/MacOS/TheSimpleBudget --
+        # walk up from it and take the *nearest* ".app" ancestor, rather
+        # than string-splitting on the first occurrence of ".app/" (which
+        # picks the wrong directory if some earlier path segment also
+        # happens to end in ".app").
+        path = exe
+        while True:
+            parent = os.path.dirname(path)
+            if parent == path:
+                break
+            if path.endswith(".app"):
+                return path
+            path = parent
+        raise OSError(f"Could not find the enclosing .app bundle for {exe!r}")
     return os.path.dirname(exe)
 
 
@@ -169,11 +212,25 @@ _WINDOWS_SCRIPT = textwrap.dedent("""\
 
     >>"%LOG%" echo %date% %time% replacing %INSTALL%
     if exist "%INSTALL%.bak" rmdir /s /q "%INSTALL%.bak"
-    move "%INSTALL%" "%INSTALL%.bak" >>"%LOG%" 2>&1
-    move "%NEWDIR%" "%INSTALL%" >>"%LOG%" 2>&1
+
+    rem /Y suppresses the interactive overwrite prompt -- this script is
+    rem launched detached with no console/stdin, so an unanswered prompt
+    rem would hang forever.
+    move /Y "%INSTALL%" "%INSTALL%.bak" >>"%LOG%" 2>&1
+    if errorlevel 1 (
+        >>"%LOG%" echo %date% %time% FAILED to move %INSTALL% aside, aborting
+        goto cleanup
+    )
+    move /Y "%NEWDIR%" "%INSTALL%" >>"%LOG%" 2>&1
+    if errorlevel 1 (
+        >>"%LOG%" echo %date% %time% FAILED to move the new build into place -- old build left at %INSTALL%.bak
+        goto cleanup
+    )
+    >>"%LOG%" echo %date% %time% replaced ok
 
     start "" "%INSTALL%\\{app_name}.exe"
 
+    :cleanup
     del "%~f0"
     """)
 
@@ -199,8 +256,7 @@ def perform_self_update(release: ReleaseInfo) -> None:
     _log(log, f"Downloaded {release.asset_url}")
 
     extract_dir = os.path.join(tmp_dir, "extracted")
-    with zipfile.ZipFile(zip_path) as zf:
-        zf.extractall(extract_dir)
+    _safe_extract(zip_path, extract_dir)
 
     if sys.platform == "darwin":
         new_root = os.path.join(extract_dir, f"{APP_NAME}.app")
